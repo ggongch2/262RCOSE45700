@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PUDO 후보 검토 v0</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="pudo_v0_data.js"></script>
+<style>
+  :root { --ok:#1a9850; --ng:#d73027; --chk:#f39c12; --bg:#fff; --fg:#222; --line:#ddd; --muted:#666; }
+  html, body { height:100%; margin:0; font:14px/1.5 "Malgun Gothic", "Apple SD Gothic Neo", sans-serif; color:var(--fg); background:var(--bg); }
+  #app { display:grid; grid-template-columns: 1fr 420px; height:100%; }
+  #map { height:100%; }
+  #side { border-left:1px solid var(--line); overflow:auto; padding:12px 16px; }
+  #bar { position:absolute; z-index:1000; top:10px; left:56px; background:#fff; border:1px solid #999; padding:8px 12px; font-size:13px; display:flex; gap:12px; align-items:center; flex-wrap:wrap; max-width:70%; }
+  #bar label { display:flex; gap:4px; align-items:center; }
+  .sum { display:flex; gap:10px; font-size:13px; }
+  .pill { padding:1px 8px; border-radius:10px; color:#fff; }
+  .pill.ok{background:var(--ok)} .pill.ng{background:var(--ng)} .pill.chk{background:var(--chk)}
+  h2 { font-size:16px; margin:6px 0 10px; }
+  table.chk { width:100%; border-collapse:collapse; font-size:12.5px; margin:8px 0; }
+  table.chk td, table.chk th { border-bottom:1px solid var(--line); padding:4px 4px; text-align:left; vertical-align:top; }
+  .p { color:var(--ok); font-weight:bold } .f { color:var(--ng); font-weight:bold } .u { color:var(--chk); font-weight:bold }
+  .est { color:var(--muted); font-size:11px; }
+  .reason { margin:4px 0; padding-left:18px; font-size:13px; }
+  .links a { display:inline-block; margin:4px 8px 4px 0; padding:6px 10px; border:1px solid #888; border-radius:4px; text-decoration:none; color:#1a4; }
+  .btns button { padding:6px 12px; margin-right:6px; cursor:pointer; }
+  textarea { width:100%; box-sizing:border-box; height:56px; }
+  .muted { color:var(--muted); font-size:12px; }
+  #empty { color:var(--muted); }
+</style>
+</head>
+<body>
+<div id="app">
+  <div style="position:relative">
+    <div id="bar">
+      <strong>PUDO 후보 v0 · 강남역 500m</strong>
+      <label>판정 <select id="fVerdict"><option value="">전체</option><option>가능</option><option>확인 필요</option><option>불가</option></select></label>
+      <label>도로 <select id="fRoad"><option value="">전체</option><option value="primary">대로</option><option value="tertiary">보조간선</option><option value="residential">이면도로</option><option value="service">골목·단지</option></select></label>
+      <label>최소 점수 <input id="fScore" type="range" min="0" max="1" step="0.1" value="0"><span id="fScoreV">0</span></label>
+      <span class="sum" id="sum"></span>
+      <button id="btnExport">GeoJSON 내보내기</button>
+    </div>
+    <div id="map"></div>
+  </div>
+  <div id="side">
+    <div id="empty">지도의 점을 누르면 판정 근거가 여기에 나옵니다.<br><br>
+      <span class="pill ok">가능</span> 세 조건 모두 통과 &nbsp; <span class="pill chk">확인 필요</span> 값이 없거나 추정값 &nbsp; <span class="pill ng">불가</span> 합법·물리 조건 위반<br><br>
+      <span class="muted">v0는 지도 데이터만 썼습니다. 사진 인식(보도·연석·현재 노면)은 2주차에 붙습니다. 차로 수·보도는 도로 유형으로 어림한 값이며 "추정" 표시가 있습니다.</span></div>
+    <div id="detail" hidden></div>
+  </div>
+</div>
+<script>
+const COLOR = {"가능":"#1a9850","확인 필요":"#f39c12","불가":"#d73027"};
+const map = L.map('map').setView(PUDO_META.center, 16);
+L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap'}).addTo(map);
+L.circle(PUDO_META.center,{radius:PUDO_META.radius_m,color:'#333',weight:1,dashArray:'4 4',fill:false}).addTo(map);
+let reviews = {}; try { reviews = JSON.parse(localStorage.getItem('pudo_reviews')||'{}'); } catch(e) {}
+let layer = null, selected = null;
+function filtered(){
+  const v=document.getElementById('fVerdict').value, r=document.getElementById('fRoad').value, s=parseFloat(document.getElementById('fScore').value);
+  return PUDO.features.filter(f=>{const p=f.properties;
+    if(v && p.verdict!==v) return false;
+    if(r && !(p.road_type===r || (r==='primary'&&p.road_type==='primary_link'))) return false;
+    if(s>0 && !(p.score!==null && p.score>=s)) return false; return true;});
+}
+function draw(){
+  if(layer) map.removeLayer(layer);
+  const fs=filtered();
+  layer=L.geoJSON({type:'FeatureCollection',features:fs},{pointToLayer:(f,ll)=>L.circleMarker(ll,{radius:5,color:'#333',weight:0.5,fillColor:COLOR[f.properties.verdict],fillOpacity:0.85}),
+    onEachFeature:(f,l)=>l.on('click',()=>show(f))}).addTo(map);
+  const c={}; fs.forEach(f=>c[f.properties.verdict]=(c[f.properties.verdict]||0)+1);
+  document.getElementById('sum').innerHTML=`후보 ${fs.length} <span class="pill ok">가능 ${c['가능']||0}</span> <span class="pill chk">확인 ${c['확인 필요']||0}</span> <span class="pill ng">불가 ${c['불가']||0}</span>`;
+}
+function show(f){
+  selected=f; const p=f.properties, [lon,lat]=f.geometry.coordinates;
+  const rv=reviews[p.id]||{};
+  const rows=p.checks.map(c=>`<tr><td>${c.item}</td><td>${c.value??'<i>없음</i>'}${c.estimated?' <span class="est">(추정)</span>':''}</td><td class="muted">${c.threshold}</td><td class="${c.pass===true?'p':c.pass===false?'f':'u'}">${c.pass===true?'통과':c.pass===false?'탈락':'모름'}</td></tr>`).join('');
+  const kakao=`https://map.kakao.com/link/roadview/${lat},${lon}`;
+  const google=p.image_id?`https://www.google.com/maps/@?api=1&map_action=pano&pano=${p.image_id}&heading=${p.heading}&fov=90`:null;
+  document.getElementById('empty').hidden=true;
+  const d=document.getElementById('detail'); d.hidden=false;
+  d.innerHTML=`
+    <h2>${p.id} <span class="pill ${p.verdict==='가능'?'ok':p.verdict==='불가'?'ng':'chk'}">${p.verdict}</span> ${p.score!==null?`점수 ${p.score}`:''}</h2>
+    <div class="muted">${p.name||'(이름 없음)'} · ${p.road_type}${p.oneway?' · 일방통행':''} · ${lat.toFixed(5)}, ${lon.toFixed(5)} · 바라보는 방향 ${p.heading}°</div>
+    <div class="links"><a href="${kakao}" target="_blank">카카오 로드뷰 열기</a>${google?`<a href="${google}" target="_blank">구글 스트리트뷰 열기</a>`:''}</div>
+    <div class="muted">${p.captured_at?`구글 사진 촬영 ${p.captured_at} (사진 ID로 열림)`:'구글 사진 30m 안에 없음. 카카오 로드뷰로 확인'} · 사진 인식은 2주차</div>
+    ${p.fail_reasons.length?`<h3 style="margin:10px 0 2px;font-size:14px">불가 사유</h3><ul class="reason">${p.fail_reasons.map(r=>`<li>${r}</li>`).join('')}</ul>`:''}
+    ${p.check_reasons.length?`<h3 style="margin:10px 0 2px;font-size:14px">확인 필요 사유</h3><ul class="reason">${p.check_reasons.map(r=>`<li>${r}</li>`).join('')}</ul>`:''}
+    <table class="chk"><tr><th>항목</th><th>값</th><th>기준</th><th>결과</th></tr>${rows}</table>
+    <div class="btns"><button id="bOk">승인</button><button id="bNo">반려</button><button id="bClr">지움</button> <span class="muted" id="rvState">${rv.review?`${rv.review} (${rv.at||''})`:'검토 전'}</span></div>
+    <textarea id="note" placeholder="메모">${rv.note||''}</textarea>
+    <div class="muted">승인·반려와 메모는 이 브라우저에만 저장됩니다. "GeoJSON 내보내기"로 파일에 담깁니다.</div>`;
+  const save=(review)=>{ reviews[p.id]={review, note:document.getElementById('note').value, at:new Date().toISOString().slice(0,16).replace('T',' ')}; if(!review) delete reviews[p.id];
+    try{localStorage.setItem('pudo_reviews',JSON.stringify(reviews));}catch(e){} document.getElementById('rvState').textContent=review?`${review} (${reviews[p.id]?.at||''})`:'검토 전'; };
+  document.getElementById('bOk').onclick=()=>save('승인'); document.getElementById('bNo').onclick=()=>save('반려'); document.getElementById('bClr').onclick=()=>save(null);
+  document.getElementById('note').onchange=()=>{ if(reviews[p.id]) save(reviews[p.id].review); };
+}
+['fVerdict','fRoad','fScore'].forEach(id=>document.getElementById(id).addEventListener('input',()=>{document.getElementById('fScoreV').textContent=document.getElementById('fScore').value; draw();}));
+document.getElementById('btnExport').onclick=()=>{
+  const fc={type:'FeatureCollection',features:PUDO.features.map(f=>{const r=reviews[f.properties.id]||{}; return {...f,properties:{...f.properties,review:r.review||null,note:r.note||null,reviewed_at:r.at||null}};})};
+  const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([JSON.stringify(fc)],{type:'application/geo+json'})); a.download='pudo_v0_reviewed.geojson'; a.click();
+};
+draw();
+</script>
+</body>
+</html>
