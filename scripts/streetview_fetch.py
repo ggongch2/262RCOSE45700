@@ -84,24 +84,24 @@ def main():
     pts = demo_points() if a.demo or not a.geojson else load_geojson(a.geojson)
     os.makedirs(os.path.join(a.out, "img"), exist_ok=True)
 
-    rows = []
+    rows = []; stats = []
     for p in pts:
         try:
             m = metadata(p["lon"], p["lat"])
         except Exception as e:
             m = {"status": f"ERROR {e}"}
+        # 구글 정책: 콘텐츠 저장 금지, 파노라마 ID만 예외. 촬영일·파노라마 좌표는 통계용으로만 쓰고 저장하지 않는다.
         row = {"id": p["id"], "lon": p["lon"], "lat": p["lat"], "status": m.get("status"),
-               "pano_id": m.get("pano_id", ""), "date": m.get("date", ""),
-               "pano_lon": "", "pano_lat": "", "offset_m": ""}
+               "pano_id": m.get("pano_id", ""), "copyright": m.get("copyright", "")}
+        _date, _off = m.get("date", ""), ""
         if m.get("status") == "OK":
             loc = m["location"]
-            row["pano_lon"], row["pano_lat"] = loc["lng"], loc["lat"]
-            row["offset_m"] = round(dist_m(p["lon"], p["lat"], loc["lng"], loc["lat"]), 1)
+            _off = round(dist_m(p["lon"], p["lat"], loc["lng"], loc["lat"]), 1)
             if a.fetch_images:
                 fetch_image(m["pano_id"], p["heading"], os.path.join(a.out, "img", f"{p['id']}.jpg"))
                 time.sleep(0.1)
-        rows.append(row)
-        print(f"{row['id']}: {row['status']} {row['date']} offset={row['offset_m']}")
+        rows.append(row); stats.append((row["status"], _date, _off))
+        print(f"{row['id']}: {row['status']} {_date} offset={_off}")
 
     with open(os.path.join(a.out, "metadata.csv"), "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
@@ -109,13 +109,15 @@ def main():
         w.writerows(rows)
 
     ok = [r for r in rows if r["status"] == "OK"]
+    user = [r for r in ok if "Google" not in r["copyright"]]
+    print(f"사용자 업로드(비구글) 사진: {len(user)}개 → 판정에는 제외")
     years = {}
-    for r in ok:
-        years[r["date"][:4]] = years.get(r["date"][:4], 0) + 1
+    for s, d, o in stats:
+        if s == "OK": years[d[:4]] = years.get(d[:4], 0) + 1
     print(f"\n후보 {len(rows)}개 중 사진 있음 {len(ok)}개 ({100*len(ok)/max(1,len(rows)):.0f}%)")
     print("촬영 연도별:", dict(sorted(years.items())))
     if ok:
-        offs = sorted(float(r["offset_m"]) for r in ok)
+        offs = sorted(float(o) for s, d, o in stats if s == "OK" and o != "")
         print(f"후보점과 파노라마 위치 차이: 중앙값 {offs[len(offs)//2]}m, 최대 {offs[-1]}m")
 
 

@@ -40,6 +40,7 @@
       <label>도로 <select id="fRoad"><option value="">전체</option><option value="primary">대로</option><option value="tertiary">보조간선</option><option value="residential">이면도로</option><option value="service">골목·단지</option></select></label>
       <label>최소 점수 <input id="fScore" type="range" min="0" max="1" step="0.1" value="0"><span id="fScoreV">0</span></label>
       <span class="sum" id="sum"></span>
+      <label title="교차로 중심 15m, 학교 반경 300m 임시 규칙을 불가 대신 확인 필요로"><input id="fMode" type="checkbox"> 임시 규칙 완화</label>
       <button id="btnExport">GeoJSON 내보내기</button>
     </div>
     <div id="map"></div>
@@ -52,6 +53,9 @@
   </div>
 </div>
 <script>
+const V=(p)=>document.getElementById('fMode').checked?p.verdict_lenient:p.verdict;
+const FR=(p)=>document.getElementById('fMode').checked?p.fail_reasons_lenient:p.fail_reasons;
+const CR=(p)=>document.getElementById('fMode').checked?p.check_reasons_lenient:p.check_reasons;
 const COLOR = {"가능":"#1a9850","확인 필요":"#f39c12","불가":"#d73027"};
 const map = L.map('map').setView(PUDO_META.center, 16);
 L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap'}).addTo(map);
@@ -61,16 +65,16 @@ let layer = null, selected = null;
 function filtered(){
   const v=document.getElementById('fVerdict').value, r=document.getElementById('fRoad').value, s=parseFloat(document.getElementById('fScore').value);
   return PUDO.features.filter(f=>{const p=f.properties;
-    if(v && p.verdict!==v) return false;
+    if(v && V(p)!==v) return false;
     if(r && !(p.road_type===r || (r==='primary'&&p.road_type==='primary_link'))) return false;
     if(s>0 && !(p.score!==null && p.score>=s)) return false; return true;});
 }
 function draw(){
   if(layer) map.removeLayer(layer);
   const fs=filtered();
-  layer=L.geoJSON({type:'FeatureCollection',features:fs},{pointToLayer:(f,ll)=>L.circleMarker(ll,{radius:5,color:'#333',weight:0.5,fillColor:COLOR[f.properties.verdict],fillOpacity:0.85}),
+  layer=L.geoJSON({type:'FeatureCollection',features:fs},{pointToLayer:(f,ll)=>L.circleMarker(ll,{radius:5,color:'#333',weight:0.5,fillColor:COLOR[V(f.properties)],fillOpacity:0.85}),
     onEachFeature:(f,l)=>l.on('click',()=>show(f))}).addTo(map);
-  const c={}; fs.forEach(f=>c[f.properties.verdict]=(c[f.properties.verdict]||0)+1);
+  const c={}; fs.forEach(f=>c[V(f.properties)]=(c[V(f.properties)]||0)+1);
   document.getElementById('sum').innerHTML=`후보 ${fs.length} <span class="pill ok">가능 ${c['가능']||0}</span> <span class="pill chk">확인 ${c['확인 필요']||0}</span> <span class="pill ng">불가 ${c['불가']||0}</span>`;
 }
 function show(f){
@@ -82,12 +86,12 @@ function show(f){
   document.getElementById('empty').hidden=true;
   const d=document.getElementById('detail'); d.hidden=false;
   d.innerHTML=`
-    <h2>${p.id} <span class="pill ${p.verdict==='가능'?'ok':p.verdict==='불가'?'ng':'chk'}">${p.verdict}</span> ${p.score!==null?`점수 ${p.score}`:''}</h2>
+    <h2>${p.id} <span class="pill ${V(p)==='가능'?'ok':V(p)==='불가'?'ng':'chk'}">${V(p)}</span> ${p.score!==null?`점수 ${p.score}`:''}</h2>
     <div class="muted">${p.name||'(이름 없음)'} · ${p.road_type}${p.oneway?' · 일방통행':''} · ${lat.toFixed(5)}, ${lon.toFixed(5)} · 바라보는 방향 ${p.heading}°</div>
     <div class="links"><a href="${kakao}" target="_blank">카카오 로드뷰 열기</a>${google?`<a href="${google}" target="_blank">구글 스트리트뷰 열기</a>`:''}</div>
-    <div class="muted">${p.captured_at?`구글 사진 촬영 ${p.captured_at} (사진 ID로 열림)`:'구글 사진 30m 안에 없음. 카카오 로드뷰로 확인'} · 사진 인식은 2주차</div>
-    ${p.fail_reasons.length?`<h3 style="margin:10px 0 2px;font-size:14px">불가 사유</h3><ul class="reason">${p.fail_reasons.map(r=>`<li>${r}</li>`).join('')}</ul>`:''}
-    ${p.check_reasons.length?`<h3 style="margin:10px 0 2px;font-size:14px">확인 필요 사유</h3><ul class="reason">${p.check_reasons.map(r=>`<li>${r}</li>`).join('')}</ul>`:''}
+    <div class="muted">${p.image_id?'구글 사진 있음 (사진 ID로 열림)':'구글 사진 30m 안에 없음. 카카오 로드뷰로 확인'} · 사진 인식은 2주차</div>
+    ${FR(p).length?`<h3 style="margin:10px 0 2px;font-size:14px">불가 사유</h3><ul class="reason">${FR(p).map(r=>`<li>${r}</li>`).join('')}</ul>`:''}
+    ${CR(p).length?`<h3 style="margin:10px 0 2px;font-size:14px">확인 필요 사유</h3><ul class="reason">${CR(p).map(r=>`<li>${r}</li>`).join('')}</ul>`:''}
     <table class="chk"><tr><th>항목</th><th>값</th><th>기준</th><th>결과</th></tr>${rows}</table>
     <div class="btns"><button id="bOk">승인</button><button id="bNo">반려</button><button id="bClr">지움</button> <span class="muted" id="rvState">${rv.review?`${rv.review} (${rv.at||''})`:'검토 전'}</span></div>
     <textarea id="note" placeholder="메모">${rv.note||''}</textarea>
@@ -97,7 +101,7 @@ function show(f){
   document.getElementById('bOk').onclick=()=>save('승인'); document.getElementById('bNo').onclick=()=>save('반려'); document.getElementById('bClr').onclick=()=>save(null);
   document.getElementById('note').onchange=()=>{ if(reviews[p.id]) save(reviews[p.id].review); };
 }
-['fVerdict','fRoad','fScore'].forEach(id=>document.getElementById(id).addEventListener('input',()=>{document.getElementById('fScoreV').textContent=document.getElementById('fScore').value; draw();}));
+['fVerdict','fRoad','fScore','fMode'].forEach(id=>document.getElementById(id).addEventListener('input',()=>{document.getElementById('fScoreV').textContent=document.getElementById('fScore').value; draw();}));
 document.getElementById('btnExport').onclick=()=>{
   const fc={type:'FeatureCollection',features:PUDO.features.map(f=>{const r=reviews[f.properties.id]||{}; return {...f,properties:{...f.properties,review:r.review||null,note:r.note||null,reviewed_at:r.at||null}};})};
   const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([JSON.stringify(fc)],{type:'application/geo+json'})); a.download='pudo_v0_reviewed.geojson'; a.click();

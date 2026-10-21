@@ -1,0 +1,21 @@
+# API 키
+env
+.env
+
+# 원본·중간 데이터 (팀 드라이브에 보관, 스크립트로 재생성)
+data/
+web/pudo_v0_data.js
+
+# 거리뷰 이미지 (Google 약관: 저장 금지) · 실행 로그
+sv_out/img/
+sv_out/*.log
+sv_out/metadata_full.csv
+
+# Word 임시 파일, 중복본, 수업 자료 PDF
+~$*.docx
+*_v2.docx
+*.pdf
+
+# 파이썬
+__pycache__/
+*.pyc
