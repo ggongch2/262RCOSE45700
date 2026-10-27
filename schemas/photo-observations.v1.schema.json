@@ -1,0 +1,162 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Photo observations v1: consumer input, not a model response format",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "results"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "photo-observations.v1"
+    },
+    "results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "candidate_id",
+          "coordinates",
+          "heading",
+          "image_id",
+          "image_source",
+          "model",
+          "observations"
+        ],
+        "properties": {
+          "candidate_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "coordinates": {
+            "type": "array",
+            "prefixItems": [
+              {
+                "type": "number",
+                "minimum": -180,
+                "maximum": 180
+              },
+              {
+                "type": "number",
+                "minimum": -90,
+                "maximum": 90
+              }
+            ],
+            "minItems": 2,
+            "maxItems": 2
+          },
+          "heading": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 360
+          },
+          "image_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "image_source": {
+            "enum": [
+              "google",
+              "mapillary",
+              "own"
+            ]
+          },
+          "model": {
+            "type": "string",
+            "minLength": 1
+          },
+          "observations": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "sidewalk",
+              "curb_blocked",
+              "curb_line"
+            ],
+            "properties": {
+              "sidewalk": {
+                "$ref": "#/$defs/booleanObservation"
+              },
+              "curb_blocked": {
+                "$ref": "#/$defs/booleanObservation"
+              },
+              "curb_line": {
+                "$ref": "#/$defs/curbObservation"
+              },
+              "construction": {
+                "$ref": "#/$defs/booleanObservation"
+              },
+              "occupied": {
+                "$ref": "#/$defs/booleanObservation"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "booleanObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "value",
+        "confidence",
+        "evidence"
+      ],
+      "properties": {
+        "value": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "confidence": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1
+        },
+        "evidence": {
+          "type": "string"
+        }
+      }
+    },
+    "curbObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "value",
+        "confidence",
+        "evidence"
+      ],
+      "properties": {
+        "value": {
+          "enum": [
+            "white",
+            "yellow_dashed",
+            "yellow_solid",
+            "yellow_double",
+            "none",
+            null
+          ]
+        },
+        "confidence": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1
+        },
+        "evidence": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

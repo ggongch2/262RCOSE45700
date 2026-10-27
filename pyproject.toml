@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gangnam-pudo"
+version = "0.1.0"
+description = "강남역 지도 기반 자율주행차 승하차 후보 검토"
+requires-python = ">=3.11"
+dependencies = [
+    "shapely>=2.0,<3",
+    "python-dotenv>=1.0,<2",
+]
+
+[project.scripts]
+pudo = "pudo.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["pudo*"]
