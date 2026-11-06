@@ -43,3 +43,11 @@ def distance_to_lines(point, lines, codes):
         (distance_to_segment(point, segment) for code in codes for segment in lines.get(code, ())),
         default=None,
     )
+
+
+def distance_to_area(point, area):
+    """미터 좌표계에서 면까지의 거리. 면 안이면 0, 면이 없으면 None."""
+    if area is None or area.is_empty:
+        return None
+    from shapely.geometry import Point
+    return area.distance(Point(point))

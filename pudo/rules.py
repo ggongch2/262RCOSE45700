@@ -5,7 +5,7 @@ from typing import Literal
 
 from .config import TH
 from .datasets import MapData
-from .geo import distance_to_lines, distance_to_points, distance_to_segments, to_meters
+from .geo import distance_to_area, distance_to_lines, distance_to_points, distance_to_segments, to_meters
 from .vision import apply_observations, validate_confidence_threshold
 
 Mode = Literal["strict", "lenient"]
@@ -17,6 +17,21 @@ NO_PARK = ("009",)
 def _within(distance, limit):
     """거리가 있고 기준 이내인지. 거리 0도 기준 이내로 판단합니다."""
     return distance is not None and distance <= limit
+
+
+def _child_zone(pr, p, data, th):
+    """(구간 안인가, 표시 정보). T-GIS 추정 구간이 있으면 그것을, 없으면 대상시설 반경을 씁니다."""
+    if data.child_zone is not None:
+        road = to_meters(*pr["centerline"]) if pr.get("centerline") else p
+        inside = distance_to_area(road, data.child_zone) <= 1.0
+        near = min(((math.hypot(p[0] - x, p[1] - y), label) for (x, y), label in data.child_zone_evidence), default=(None, None))
+        evidence = f"근거 {near[1]} {near[0]:.0f}m" if near[0] is not None else "근거 없음"
+        value = f"구간 안 ({evidence})" if inside else "구간 밖"
+        return inside, {"mode": "tgis", "value": value, "reason": f"추정 구간 안, {evidence}"}
+    sch = min(((math.hypot(p[0] - s[0], p[1] - s[1]), nm) for s, nm in data.schools), default=(None, None))
+    inside = sch[0] is not None and sch[0] <= th["H6 학교"]
+    value = f"{sch[1]} {sch[0]:.0f}m" if sch[0] is not None else None
+    return inside, {"mode": "radius", "value": value, "reason": f"{sch[1]} {sch[0]:.0f}m, 임시 버퍼" if inside else ""}
 
 
 def judge(f, data: MapData, *, mode: Mode = "strict", thresholds=None, photo_min_confidence=0.8):
@@ -36,16 +51,27 @@ def judge(f, data: MapData, *, mode: Mode = "strict", thresholds=None, photo_min
         if not ok: fails.append(f"{item} {d:.1f}m (기준 {thr}m)")
         elif near: needs.append(f"{item} {d:.1f}m, 기준 {thr}m에 근접 (좌표 오차 ±{th['COORD_ERR']}m)")
     # ① 합법 — 거리
-    d_int = distance_to_points(p, data.intersections); dist_rule("H1 교차로", d_int, th["H1 교차로"]); checks[-1]["estimated"] = True
-    if lenient and fails and fails[-1].startswith("H1 교차로"): needs.append(fails.pop() + " [임시 규칙 → 확인 필요]")
+    # 도로교통법 제32조: 교차로 안(1호), 교차로 가장자리·도로 모퉁이 5m 이내(2호) 정차 금지.
+    # 교차로 면은 차도 폭 추정으로 만들므로 추정값이며, 기준 직후 구간은 확인 필요로 둡니다.
+    d_int = distance_to_area(p, data.intersection_area)
+    if d_int == 0:
+        checks.append(dict(item="H1 교차로", value="교차로 안", threshold=f"가장자리에서 {th['H1 교차로']}m 초과", **{"pass": False}, estimated=True))
+        fails.append("H1 교차로 안 (도로교통법 제32조 1호)")
+    else:
+        dist_rule("H1 교차로", d_int, th["H1 교차로"]); checks[-1]["estimated"] = True
+        checks[-1]["threshold"] = f"가장자리에서 {th['H1 교차로']}m 초과"
     dist_rule("H2 횡단보도", distance_to_points(p, data.crosswalks), th["H2 횡단보도"])
     dist_rule("H3 정류장", distance_to_points(p, data.buses), th["H3 정류장"])
     dist_rule("H4 소화전", distance_to_points(p, data.hydrants), th["H4 소화전"])
-    # ① 합법 — 어린이보호구역 (임시 버퍼)
-    sch = min(((math.hypot(p[0]-s[0], p[1]-s[1]), nm) for s, nm in data.schools), default=(None, None))
-    in_zone = sch[0] is not None and sch[0] <= th["H6 학교"]
-    checks.append(dict(item="H6 어린이보호구역", value=f"{sch[1]} {sch[0]:.0f}m" if sch[0] is not None else None, threshold=f"학교 {th['H6 학교']}m 밖 (임시)", **{"pass": not in_zone}, estimated=True))
-    if in_zone: (needs if lenient else fails).append(f"H6 어린이보호구역 ({sch[1]} {sch[0]:.0f}m, 임시 버퍼{' → 확인 필요' if lenient else ''})")
+    # ① 합법 — 어린이보호구역 (도로교통법 제32조 8호, 2021.10.21부터 주정차 금지)
+    in_zone, zone_note = _child_zone(pr, p, data, th)
+    zone_item = dict(item="H6 어린이보호구역", estimated=True)
+    if zone_note["mode"] == "tgis":
+        zone_item.update(value=zone_note["value"], threshold="보호구역 구간 밖 (T-GIS 표지·노면표시로 추정)", **{"pass": not in_zone})
+    else:
+        zone_item.update(value=zone_note["value"], threshold=f"대상시설 {th['H6 학교']}m 밖 (지정 구간 미확인)", **{"pass": not in_zone})
+    checks.append(zone_item)
+    if in_zone: (needs if lenient else fails).append(f"H6 어린이보호구역 ({zone_note['reason']}{' → 확인 필요' if lenient else ''})")
     # ① 합법 — 안전지대 사방 10m (정밀도로지도 531). 지도가 없는 도로는 판정 불가(null)
     if data.hd_safe and _within(distance_to_segments(p, data.hd_link), 15):
         d_sz = distance_to_segments(p, data.hd_safe)

@@ -5,9 +5,48 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 from .config import CENTER_LAT, CENTER_LON, RADIUS_M, TH
+from .geo import to_lonlat
 
 
-def write_results(result, data_dir, web_dir, *, thresholds=None):
+def _lonlat(geometry):
+    """미터 좌표 shapely 도형 → GeoJSON 도형 (WGS84)."""
+    import shapely
+    from shapely.geometry import mapping
+
+    def convert(coordinates):
+        return [to_lonlat(x, y) for x, y in coordinates]
+
+    return mapping(shapely.transform(geometry, lambda array: convert(array)))
+
+
+def overlay_layers(map_data):
+    """화면에서 판정 근거를 겹쳐 볼 레이어. 미터 좌표를 WGS84로 되돌립니다."""
+    from shapely.geometry import LineString, Point
+
+    def points(items, **extra):
+        return [{"type": "Feature", "geometry": _lonlat(Point(xy)), "properties": dict(extra)} for xy in items]
+
+    def parts(geometry):
+        if geometry is None or geometry.is_empty:
+            return []
+        return list(getattr(geometry, "geoms", [geometry]))
+
+    no_stop = [segment for code in ("010", "014", "015", "005", "017") for segment in map_data.lines.get(code, ())]
+    layers = {
+        "intersection": [{"type": "Feature", "geometry": _lonlat(part), "properties": {}} for part in parts(map_data.intersection_area)],
+        "child_zone": [{"type": "Feature", "geometry": _lonlat(part), "properties": {}} for part in parts(map_data.child_zone)],
+        "child_zone_evidence": [{"type": "Feature", "geometry": _lonlat(Point(xy)), "properties": {"label": label}}
+                                for xy, label in map_data.child_zone_evidence],
+        "crosswalk": points(map_data.crosswalks),
+        "bus": points(map_data.buses),
+        "hydrant": points(map_data.hydrants),
+        "no_stop_line": [{"type": "Feature", "geometry": _lonlat(LineString(segment)), "properties": {}}
+                         for segment in no_stop if len(segment) >= 2],
+    }
+    return {name: {"type": "FeatureCollection", "features": features} for name, features in layers.items()}
+
+
+def write_results(result, data_dir, web_dir, *, thresholds=None, layers=None):
     data_dir, web_dir = Path(data_dir), Path(web_dir)
     data_dir.mkdir(parents=True, exist_ok=True)
     web_dir.mkdir(parents=True, exist_ok=True)
@@ -21,6 +60,7 @@ def write_results(result, data_dir, web_dir, *, thresholds=None):
     }
     javascript = "const PUDO=" + payload + ";\n"
     javascript += "const PUDO_META=" + json.dumps(meta, ensure_ascii=False) + ";\n"
+    javascript += "const PUDO_LAYERS=" + json.dumps(layers or {}, ensure_ascii=False) + ";\n"
     js_path = web_dir / "pudo_v0_data.js"
     js_path.write_text(javascript, encoding="utf-8")
     outputs = [geojson_path, js_path]
@@ -47,7 +87,7 @@ def print_summary(result):
         f"불가 {verdicts['불가']} ({100 * verdicts['불가'] / max(1, n):.0f}%)"
     )
     lenient = Counter(f["properties"]["verdict_lenient"] for f in features)
-    print(f"  완화(임시 규칙→확인 필요): 가능 {lenient['가능']} / 확인 필요 {lenient['확인 필요']} / 불가 {lenient['불가']}")
+    print(f"  완화(어린이보호구역→확인 필요): 가능 {lenient['가능']} / 확인 필요 {lenient['확인 필요']} / 불가 {lenient['불가']}")
     failures = Counter(
         " ".join(reason.split(" ")[:2]) for f in features for reason in f["properties"]["fail_reasons"]
     )

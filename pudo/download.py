@@ -17,6 +17,13 @@ from .geo import CX, CY
 VWORLD_DATA = "https://api.vworld.kr/req/data"
 VWORLD_WFS = "https://api.vworld.kr/req/wfs"
 OVERPASS = "https://overpass-api.de/api/interpreter"
+SEOUL_DATASET = "https://data.seoul.go.kr/dataList/{}/S/1/datasetView.do"
+SEOUL_FILE = "https://datafile.seoul.go.kr/bigfile/iot/inf/nio_download.do?&useCache=false"
+# 서울시 교통안전시설물(T-GIS) 원본: (데이터셋, 압축 파일 이름 접두어, 필요한 shp 이름)
+TGIS_LAYERS = {
+    "tgis/A064_P_signs.geojson": ("OA-15540", "A064_P", "A064_P"),        # 안전표지 (어린이보호구역 시작·해제 등)
+    "tgis/A054_P_text_marks.geojson": ("OA-15535", "A054_P", "A054_P"),  # 노면 문자표시 ("어린이 보호구역" 등)
+}
 REQUIRED_LAYERS = (
     "C 횡단보도", "C 소화전", "C 버스정류소",
     "C 학교(보호구역 300m 버퍼)", "D 규제차선 (T-GIS)",
@@ -151,6 +158,81 @@ def prepare_roads(response):
     return response
 
 
+def _seoul_file_list(dataset):
+    """열린데이터광장 데이터셋 화면에서 (파일 번호, 파일 이름) 목록과 파일 묶음 번호를 읽습니다."""
+    request = urllib.request.Request(SEOUL_DATASET.format(dataset), headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        with urllib.request.urlopen(request, timeout=50) as response:
+            page = response.read().decode("utf-8", "replace")
+    except (urllib.error.URLError, TimeoutError, OSError) as error:
+        raise DownloadError(f"서울 열린데이터광장 {dataset}: 연결 실패 ({type(error).__name__})") from None
+    files = re.findall(r"downloadFile\('(\d+)'\);\" title=\"([^\"]+)\"", page)
+    sequences = re.findall(r'name="infSeq" value="(\d+)"', page)
+    if not files or not sequences:
+        raise DownloadError(f"서울 열린데이터광장 {dataset}: 파일 목록을 찾지 못했습니다.")
+    return files, sequences[-1]
+
+
+def fetch_tgis(dataset, prefix, member, bbox):
+    """T-GIS shp 압축 파일을 받아 bbox 안의 객체만 WGS84 GeoJSON으로 변환합니다."""
+    import io
+    import zipfile
+
+    import shapefile
+    from pyproj import Transformer
+
+    files, sequence = _seoul_file_list(dataset)
+    matches = [number for number, name in files if name.startswith(prefix) and name.endswith(".zip")]
+    if not matches:
+        raise DownloadError(f"서울 열린데이터광장 {dataset}: {prefix} 압축 파일이 없습니다.")
+    body = urllib.parse.urlencode({"infId": dataset, "seqNo": "", "seq": matches[0], "infSeq": sequence}).encode()
+    request = urllib.request.Request(SEOUL_FILE, data=body, headers={
+        "User-Agent": "Mozilla/5.0", "Referer": SEOUL_DATASET.format(dataset)})
+    try:
+        with urllib.request.urlopen(request, timeout=300) as response:
+            archive = zipfile.ZipFile(io.BytesIO(response.read()))
+    except (urllib.error.URLError, TimeoutError, OSError) as error:
+        raise DownloadError(f"서울 열린데이터광장 {dataset}: 파일 다운로드 실패 ({type(error).__name__})") from None
+    except zipfile.BadZipFile:
+        raise DownloadError(f"서울 열린데이터광장 {dataset}: 압축 파일이 아닌 응답") from None
+    names = {Path(name).name: name for name in archive.namelist()}
+    if f"{member}.shp" not in names:   # 압축 안에 압축이 한 번 더 있는 경우
+        inner = [name for name in archive.namelist() if name.lower().endswith(".zip")]
+        if not inner:
+            raise DownloadError(f"서울 열린데이터광장 {dataset}: {member}.shp가 없습니다.")
+        archive = zipfile.ZipFile(io.BytesIO(archive.read(inner[0])))
+        names = {Path(name).name: name for name in archive.namelist()}
+    parts = {ext: io.BytesIO(archive.read(names[f"{member}.{ext}"])) for ext in ("shp", "shx", "dbf")}
+    to_wgs84 = Transformer.from_crs(5186, 4326, always_xy=True)   # T-GIS: KGD2002 중부원점 (EPSG:5186)
+    to_tm = Transformer.from_crs(4326, 5186, always_xy=True)
+    west, south = to_tm.transform(bbox[0], bbox[1])
+    east, north = to_tm.transform(bbox[2], bbox[3])
+
+    def convert(coordinates):
+        if isinstance(coordinates[0], (int, float)):
+            return [round(value, 7) for value in to_wgs84.transform(coordinates[0], coordinates[1])]
+        return [convert(item) for item in coordinates]
+
+    features = []
+    reader = shapefile.Reader(**parts, encoding="cp949", encodingErrors="replace")
+    for record in reader.iterShapeRecords():
+        points = record.shape.points
+        if not points:
+            continue
+        xs, ys = [x for x, _ in points], [y for _, y in points]
+        if max(xs) < west or min(xs) > east or max(ys) < south or min(ys) > north:
+            continue
+        geometry = record.shape.__geo_interface__
+        properties = {key: value.strip() if isinstance(value, str) else value for key, value in record.record.as_dict().items()}
+        features.append({"type": "Feature", "properties": properties,
+                         "geometry": {"type": geometry["type"], "coordinates": convert(geometry["coordinates"])}})
+    if not features:
+        raise DownloadError(f"서울 열린데이터광장 {dataset}: 조회 범위에 객체가 없습니다.")
+    result = collection(features)
+    result["pudo_source"] = {"dataset": dataset, "file": dict(files)[matches[0]], "crs_from": "EPSG:5186"}
+    return result
+
+
 def restore_layers(preview):
     text = Path(preview).read_text(encoding="utf-8")
     match = re.search(r"\bconst\s+DATA\s*=\s*", text)
@@ -188,6 +270,9 @@ def main(argv=None):
         ("vworld_road_parcels_gangnam.geojson", "download", VWORLD_DATA, lambda: fetch_parcels(key, bbox)),
         ("hdmap/lt_l_a2link.geojson", "download", VWORLD_WFS, lambda: fetch_hdmap(key, "lt_l_a2link", bbox)),
         ("hdmap/lt_l_b2surfacelinemark.geojson", "download", VWORLD_WFS, lambda: fetch_hdmap(key, "lt_l_b2surfacelinemark", bbox)),
+    ] + [
+        (filename, "download", SEOUL_DATASET.format(dataset), lambda d=dataset, p=prefix, m=member: fetch_tgis(d, p, m, bbox))
+        for filename, (dataset, prefix, member) in TGIS_LAYERS.items()
     ]
     manifest_path = args.out / "download_manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.is_file() else {"files": {}}

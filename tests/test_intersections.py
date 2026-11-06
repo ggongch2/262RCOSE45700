@@ -1,7 +1,7 @@
 import unittest
 
 from pudo.config import CENTER_LAT, CENTER_LON
-from pudo.datasets import _intersections
+from pudo.datasets import _intersection_area, _intersections
 from pudo.geo import to_lonlat
 
 
@@ -49,6 +49,32 @@ class IntersectionTests(unittest.TestCase):
             way(2, [3, 4], [(0, 0), (50, 0)]),
         ]
         self.assertEqual(found(elements), [])
+
+
+class IntersectionAreaTests(unittest.TestCase):
+    def test_crossing_area_is_overlap_of_carriageways(self):
+        elements = [
+            way(1, [1, 2, 3], [(-50, 0), (0, 0), (50, 0)]),
+            way(2, [4, 2, 5], [(0, -50), (0, 0), (0, 50)]),
+        ]
+        area = _intersection_area(elements, {1: 6, 2: 4})
+        self.assertAlmostEqual(area.area, 12 * 8, delta=1)   # 폭 12m × 8m 상자
+
+    def test_divided_road_median_is_inside_one_intersection(self):
+        tags = {"name": "대로"}
+        elements = [
+            {**way(1, [1, 2, 3], [(-50, 8), (0, 8), (50, 8)]), "tags": tags},     # 상행
+            {**way(2, [4, 5, 6], [(50, -8), (0, -8), (-50, -8)]), "tags": tags},  # 하행
+            way(3, [7, 2, 5, 8], [(0, 50), (0, 8), (0, -8), (0, -50)]),
+        ]
+        area = _intersection_area(elements, {1: 5, 2: 5, 3: 4})
+        self.assertTrue(area.contains(to_point(0, 0)))   # 중앙분리대 위도 교차로 안
+        self.assertFalse(area.contains(to_point(0, 20)))
+
+
+def to_point(x, y):
+    from shapely.geometry import Point
+    return Point(x, y)
 
 
 if __name__ == "__main__":

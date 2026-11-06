@@ -10,13 +10,17 @@ from pathlib import Path
 from .config import CONTINUATION_TURN_DEG, require_files
 from .geo import to_meters
 from .vision import load_assessments, PhotoContractError
+from .zones import build_child_zone, zone_evidence
 
 
 @dataclass
 class MapData:
     """한 번 로딩해 여러 후보와 판정 모드에서 공유하는 읽기용 데이터."""
 
-    intersections: list = field(default_factory=list)
+    intersections: list = field(default_factory=list)   # 교차 노드 (참고용)
+    intersection_area: object = None                     # 교차로 면 (shapely, 미터 좌표). H1 판정에 사용
+    child_zone: object = None                            # 어린이보호구역 추정 구간 (shapely 선). 없으면 시설 반경 규칙
+    child_zone_evidence: list = field(default_factory=list)   # [(좌표, 설명)] 구간 근거 표지·노면표시
     crosswalks: list = field(default_factory=list)
     hydrants: list = field(default_factory=list)
     buses: list = field(default_factory=list)
@@ -89,6 +93,108 @@ def _intersections(elements):
     ]
 
 
+INTERSECTION_REACH_M = 40   # 교차 노드에서 이 반경 안의 도로 겹침만 교차로 면으로 봄
+MEDIAN_FILL_M = 10          # 같은 이름의 상하행 차도 사이(중앙분리대) 20m까지 한 도로로 메움
+HALF_WIDTH_DEFAULT = {"primary": 6.5, "primary_link": 3.25, "secondary": 4.9, "tertiary": 3.25}
+
+
+def _half_widths(candidates_path):
+    """길별 차도 반폭. 후보 생성 때 쓴 값(가장자리 이동 거리 + 1.5m)의 중앙값."""
+    if not Path(candidates_path).is_file():
+        return {}
+    offsets = defaultdict(list)
+    for feature in read_json(candidates_path)["features"]:
+        properties = feature["properties"]
+        if properties.get("osm_way") is not None and properties.get("curb_offset_m") is not None:
+            offsets[properties["osm_way"]].append(properties["curb_offset_m"])
+    return {way: sorted(values)[len(values) // 2] + 1.5 for way, values in offsets.items()}
+
+
+def _intersection_area(elements, half_widths):
+    """차도 면이 겹치는 교차로 면 (도로교통법 제32조 1·2호의 '교차로'와 '가장자리' 판정용).
+
+    길마다 차도 반폭만큼 면을 만들고, 이름이 같은 길(상하행 분리 차도 포함)을 한 도로로 합친 뒤
+    교차 노드 주변에서 서로 다른 도로가 겹치는 부분을 교차로 면으로 봅니다.
+    이름이 같은 길끼리 꺾이는 모퉁이는 두 길의 면이 겹치는 부분을 씁니다.
+    """
+    from shapely.geometry import LineString, Point
+    from shapely.ops import unary_union
+
+    ways = [element for element in elements if element["type"] == "way" and len(element["geometry"]) >= 2]
+    if not ways:
+        return None
+    road = {way["id"]: way.get("tags", {}).get("name") or f"way{way['id']}" for way in ways}
+    shapes, by_road, entries, positions = {}, defaultdict(list), defaultdict(list), {}
+    for way in ways:
+        points = [to_meters(point["lon"], point["lat"]) for point in way["geometry"]]
+        half = half_widths.get(way["id"], HALF_WIDTH_DEFAULT.get(way.get("tags", {}).get("highway"), 3.25))
+        shapes[way["id"]] = (LineString(points), half)
+        by_road[road[way["id"]]].append(LineString(points).buffer(half, cap_style=2))
+        for index, (node, position) in enumerate(zip(way["nodes"], points)):
+            entries[node].append((way["id"], index, points))
+            positions[node] = position
+    corridors = {
+        name: unary_union(parts).buffer(MEDIAN_FILL_M, join_style=2).buffer(-MEDIAN_FILL_M, join_style=2)
+        for name, parts in by_road.items()
+    }
+    pieces = []
+    for node, node_entries in entries.items():
+        way_ids = sorted({way_id for way_id, _, _ in node_entries})
+        if len(way_ids) < 2 or _is_straight_continuation(node_entries):
+            continue
+        center = Point(positions[node])
+        reach = center.buffer(INTERSECTION_REACH_M)
+        names = sorted({road[way_id] for way_id in way_ids})
+        if len(names) >= 2:
+            for i, first in enumerate(names):
+                for second in names[i + 1:]:
+                    overlap = corridors[first].intersection(corridors[second]).intersection(reach)
+                    pieces += [part for part in getattr(overlap, "geoms", [overlap])
+                               if part.geom_type == "Polygon" and part.distance(center) < 1]
+        else:
+            local = [shapes[way_id][0].intersection(reach).buffer(shapes[way_id][1], cap_style=2) for way_id in way_ids]
+            pieces += [a.intersection(b) for i, a in enumerate(local) for b in local[i + 1:] if a.intersects(b)]
+    pieces = [piece for piece in pieces if not piece.is_empty and piece.area > 0]
+    return unary_union(pieces) if pieces else None
+
+
+ZONE_STANDARD_FILE = "child_protection_zones.csv"   # 전국어린이보호구역표준데이터 (공공데이터포털 15012891)
+NOT_ZONE_TARGET = ("중학교", "고등학교")             # 도로교통법 제12조 지정 대상이 아님
+
+
+def _protection_facilities(data_dir, layers):
+    """어린이보호구역 대상시설 [(미터 좌표, 이름)].
+
+    data/에 표준데이터 CSV가 있으면 실제 지정 시설(유치원·어린이집·학원 포함)을 쓰고,
+    없으면 스냅샷의 학교 좌표에서 지정 대상이 아닌 중·고등학교를 뺍니다.
+    """
+    path = Path(data_dir) / ZONE_STANDARD_FILE
+    if path.is_file():
+        for encoding in ("utf-8-sig", "cp949"):
+            try:
+                with path.open(encoding=encoding, newline="") as stream:
+                    rows = list(csv.DictReader(stream))
+                break
+            except UnicodeDecodeError:
+                continue
+        else:
+            raise ValueError(f"{path.name}: UTF-8 또는 CP949가 아닙니다.")
+        facilities = []
+        for row in rows:
+            try:
+                position = to_meters(float(row["경도"]), float(row["위도"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+            if math.hypot(*position) <= 1500:   # 판정 영역 500m + 지정 범위 상한 여유
+                facilities.append((position, f"{row.get('대상시설명', '').strip()} ({row.get('시설종류', '').strip()})"))
+        return facilities
+    return [
+        (to_meters(*feature["geometry"]["coordinates"]), feature["properties"]["이름"])
+        for feature in layers["C 학교(보호구역 300m 버퍼)"]["features"]
+        if not feature["properties"]["이름"].endswith(NOT_ZONE_TARGET)
+    ]
+
+
 def _images(path):
     if not path.is_file():
         return {}
@@ -119,15 +225,23 @@ def load_map_data(data_dir, sv_dir):
     except FileNotFoundError:
         surface, links = [], []
 
+    roads = read_json(data_dir / "osm_roads_gangnam.json")["elements"]
+    facilities = _protection_facilities(data_dir, layers)
+    child_zone, evidence = None, []
+    signs_path, marks_path = data_dir / "tgis" / "A064_P_signs.geojson", data_dir / "tgis" / "A054_P_text_marks.geojson"
+    if signs_path.is_file() and marks_path.is_file():
+        # 학교 좌표(블록 중심)는 도로와 멀어 구간 근거로 쓰지 않습니다. 학교 주변은 표지·노면표시가 덮습니다.
+        evidence, boundaries = zone_evidence(read_json(signs_path)["features"], read_json(marks_path)["features"], [])
+        child_zone = build_child_zone(roads, evidence, boundaries)
     return MapData(
-        intersections=_intersections(read_json(data_dir / "osm_roads_gangnam.json")["elements"]),
+        intersections=_intersections(roads),
+        intersection_area=_intersection_area(roads, _half_widths(data_dir / "candidates_v1.geojson")),
         crosswalks=points("C 횡단보도"),
         hydrants=points("C 소화전"),
         buses=points("C 버스정류소"),
-        schools=[
-            (to_meters(*feature["geometry"]["coordinates"]), feature["properties"]["이름"])
-            for feature in layers["C 학교(보호구역 300m 버퍼)"]["features"]
-        ],
+        schools=facilities,
+        child_zone=child_zone,
+        child_zone_evidence=evidence,
         lines=dict(lines),
         hd_reg=_hd_lines(surface, lambda p: (p.get("kind") == "515" and p.get("type") in ("111", "121")) or p.get("kind") == "516"),
         hd_park=_hd_lines(surface, lambda p: p.get("kind") == "515" and p.get("type") == "112"),

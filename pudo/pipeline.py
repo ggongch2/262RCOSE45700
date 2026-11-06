@@ -4,7 +4,7 @@ import argparse
 
 from .config import DATA_DIR, SV_DIR, WEB_DIR
 from .datasets import load_inputs
-from .export import print_summary, write_results
+from .export import overlay_layers, print_summary, write_results
 from .rules import evaluate_candidates
 from .vision import PhotoContractError, validate_confidence_threshold
 
@@ -13,7 +13,7 @@ def run_pipeline(*, data_dir, sv_dir, web_dir, photo_results=None, photo_min_con
     validate_confidence_threshold(photo_min_confidence)
     candidates, map_data = load_inputs(data_dir, sv_dir, photo_results=photo_results)
     result = evaluate_candidates(candidates, map_data, photo_min_confidence=photo_min_confidence)
-    outputs = write_results(result, data_dir, web_dir)
+    outputs = write_results(result, data_dir, web_dir, layers=overlay_layers(map_data))
     print_summary(result)
     print("저장:", ", ".join(str(path) for path in outputs))
     return result

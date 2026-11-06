@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from pudo.datasets import MapData
+from shapely.geometry import box
 from pudo.rules import evaluate_candidates, judge
 from pudo.config import CENTER_LAT, CENTER_LON
 from pudo.vision import PhotoContractError, SCHEMA_VERSION, load_assessments, parse_assessments
@@ -27,7 +28,7 @@ def fixture(row=None, road_type="primary"):
     feature = {"type": "Feature", "geometry": {"type": "Point", "coordinates": [CENTER_LON, CENTER_LAT]},
                "properties": {"id": "TEST", "road_type": road_type, "oneway": False, "lanes": 2,
                               "lanes_source": "hdmap", "heading": 90}}
-    data = MapData(intersections=[(100, 100)], crosswalks=[(100, 100)], hydrants=[(100, 100)],
+    data = MapData(intersections=[(100, 100)], intersection_area=box(90, 90, 110, 110), crosswalks=[(100, 100)], hydrants=[(100, 100)],
                    buses=[(100, 100)], schools=[((400, 0), "학교")])
     if row is not None:
         data.photo_assessments = parse_assessments({"schema_version": SCHEMA_VERSION, "results": [row]})

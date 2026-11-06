@@ -21,14 +21,16 @@ pudo_v0.geojson / pudo_v0_data.js / pudo_v0_standalone.html
 | 파일 | 구조 | 주요 소비 코드 |
 |---|---|---|
 | `osm_roads_gangnam.json` | Overpass JSON의 `elements[]`: way, tags, nodes, geometry | 후보 생성, 교차로 계산 |
-| `layers_gangnam.json` | 레이어 이름 → GeoJSON FeatureCollection | 시설 거리, 학교 반경, 서울시 규제선 |
+| `layers_gangnam.json` | 레이어 이름 → GeoJSON FeatureCollection | 시설 거리, 학교 반경(T-GIS가 없을 때), 서울시 규제선 |
 | `hdmap/lt_l_a2link.geojson` | 선 GeoJSON, `properties.laneno` | 후보 생성, 정밀도로지도 커버리지 |
 | `hdmap/lt_l_b2surfacelinemark.geojson` | 선 GeoJSON, `properties.kind/type` | 규제선·버스차로·안전지대 |
+| `tgis/A064_P_signs.geojson` | 점 GeoJSON, T-GIS 안전표지 원본 속성(`MRK_NUM`, `RMK` 등) | 어린이보호구역 근거·경계 |
+| `tgis/A054_P_text_marks.geojson` | 점 GeoJSON, T-GIS 노면 문자표시 원본 속성(`CTT` 등) | 어린이보호구역 근거 |
 | `vworld_road_parcels_gangnam.geojson` | 도로 필지 MultiPolygon GeoJSON | 도로 폭 추정 |
 
 외부 입력마다 구조가 다르며, 로더가 판정에 필요한 좌표와 속성으로 변환합니다. 외부 GeoJSON 좌표는 `[경도, 위도]`의 WGS84이며, `MapData`의 점·선은 강남역 기준 근사 미터 좌표입니다. 웹 지도 중심 `PUDO_META.center`만 Leaflet 형식인 `[위도, 경도]`입니다.
 
-H1의 교차로 점은 OSM 차도에서 두 개 이상의 서로 다른 way가 공유하는 노드입니다. 닫힌 way의 시작·끝 노드와, 두 way의 끝이 `CONTINUATION_TURN_DEG`(20°) 미만으로 꺾이며 이어지는 분할 지점은 제외합니다. 다른 길과 직각에 가깝게 이어지는 끝점은 도로 모퉁이로 보고 유지합니다.
+H1은 교차로 면까지의 거리로 판정합니다(면 안이면 제32조 1호 불가, 가장자리 5m 이내면 2호 불가). 교차로 면은 각 way를 차도 반폭(후보 생성 때의 가장자리 이동 거리 + 1.5m 중앙값)만큼 넓힌 뒤 같은 이름의 도로를 하나로 합치고(상하행 사이 20m까지 메움), 교차 노드 40m 안에서 서로 다른 도로가 겹치는 부분입니다. 교차 노드는 OSM 차도에서 두 개 이상의 서로 다른 way가 공유하는 노드입니다. 닫힌 way의 시작·끝 노드와, 두 way의 끝이 `CONTINUATION_TURN_DEG`(20°) 미만으로 꺾이며 이어지는 분할 지점은 제외합니다. 다른 길과 직각에 가깝게 이어지는 끝점은 도로 모퉁이로 보고 유지합니다.
 
 ## 후보 생성 → 지도 판정 / 거리뷰 조회
 

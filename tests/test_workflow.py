@@ -46,7 +46,7 @@ def write_fixture(root):
         "C 횡단보도": collection(feature("Point", to_lonlat(30, 0))),
         "C 소화전": collection(feature("Point", to_lonlat(-80, 0))),
         "C 버스정류소": collection(feature("Point", to_lonlat(70, 0))),
-        "C 학교(보호구역 300m 버퍼)": collection(feature("Point", to_lonlat(-350, 0), 이름="테스트 학교")),
+        "C 학교(보호구역 300m 버퍼)": collection(feature("Point", to_lonlat(-250, 0), 이름="테스트 초등학교")),
         "D 규제차선 (T-GIS)": collection(feature("LineString", regulation, code="010")),
     }
     inputs = {

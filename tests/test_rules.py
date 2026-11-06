@@ -5,6 +5,7 @@ from pudo.config import CENTER_LAT, CENTER_LON, TH
 from pudo.datasets import MapData
 from pudo.geo import distance_to_points, distance_to_segment, distance_to_segments
 from pudo.rules import evaluate_candidates, judge
+from shapely.geometry import box
 
 
 def candidate():
@@ -16,14 +17,13 @@ def candidate():
 
 
 def clear_map():
-    return MapData(intersections=[(100, 100)], crosswalks=[(100, 100)], hydrants=[(100, 100)],
-                   buses=[(100, 100)], schools=[((400, 0), "학교")])
+    return MapData(intersections=[(100, 100)], intersection_area=box(90, 90, 110, 110), crosswalks=[(100, 100)],
+                   hydrants=[(100, 100)], buses=[(100, 100)], schools=[((400, 0), "학교")])
 
 
 class RuleTests(unittest.TestCase):
     def test_modes_are_explicit_independent_and_do_not_mutate_inputs(self):
         feature, data = candidate(), clear_map()
-        data.intersections = [(10, 0)]
         data.schools = [((100, 0), "학교")]
         original_feature, original_data, original_thresholds = copy.deepcopy((feature, data, TH))
         first = judge(feature, data, mode="strict")
@@ -33,13 +33,13 @@ class RuleTests(unittest.TestCase):
         self.assertEqual(first["properties"]["verdict"], "불가")
         self.assertEqual(lenient["properties"]["verdict"], "확인 필요")
         self.assertEqual(lenient["properties"]["fail_reasons"], [])
-        self.assertEqual(len(lenient["properties"]["check_reasons"]), 2)
+        self.assertEqual(len(lenient["properties"]["check_reasons"]), 1)
         self.assertEqual((feature, data, TH), (original_feature, original_data, original_thresholds))
 
     def test_lenient_does_not_relax_hydrant_rule(self):
         data = clear_map()
         data.hydrants = [(1, 0)]
-        data.intersections = [(10, 0)]
+        data.intersection_area = box(3, -10, 20, 10)
         for mode in ("strict", "lenient"):
             result = judge(candidate(), data, mode=mode)["properties"]
             self.assertEqual(result["verdict"], "불가")
@@ -86,13 +86,28 @@ class RuleTests(unittest.TestCase):
         narrow = {**TH, "H5 정밀도로지도 규제선": 5}
         self.assertFalse(any(r.startswith("H5") for r in judge(feature, data, thresholds=narrow)["properties"]["check_reasons"]))
 
+    def test_intersection_uses_area_edge_per_road_traffic_act(self):
+        # 제32조 1호 교차로 안, 2호 가장자리 5m 이내는 불가. 완화 모드에서도 풀지 않음
+        for edge, expected in ((-5, "불가"), (5, "불가"), (6, "확인 필요"), (13, "가능")):
+            with self.subTest(edge=edge):
+                data = clear_map()
+                data.intersection_area = box(edge, -10, edge + 20, 10) if edge > 0 else box(-5, -10, 15, 10)
+                for mode in ("strict", "lenient"):
+                    self.assertEqual(judge(candidate(), data, mode=mode)["properties"]["verdict"], expected)
+        data = clear_map(); data.intersection_area = box(-5, -10, 15, 10)
+        self.assertIn("H1 교차로 안 (도로교통법 제32조 1호)", judge(candidate(), data)["properties"]["fail_reasons"])
+
+    def test_missing_intersection_area_requires_confirmation(self):
+        data = clear_map(); data.intersection_area = None
+        self.assertIn("H1 교차로 데이터 없음", judge(candidate(), data)["properties"]["check_reasons"])
+
     def test_invalid_mode_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "판정 모드"):
             judge(candidate(), clear_map(), mode="unknown")
 
     def test_combined_output_preserves_v0_mode_fields(self):
         feature, data = candidate(), clear_map()
-        data.intersections = [(10, 0)]
+        data.schools = [((100, 0), "학교")]
         strict = judge(feature, data, mode="strict")["properties"]
         lenient = judge(feature, data, mode="lenient")["properties"]
         result = evaluate_candidates([feature], data)["features"][0]["properties"]
