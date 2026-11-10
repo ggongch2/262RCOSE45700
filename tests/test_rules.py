@@ -4,7 +4,9 @@ import unittest
 from pudo.config import CENTER_LAT, CENTER_LON, TH
 from pudo.datasets import MapData
 from pudo.geo import distance_to_points, distance_to_segment, distance_to_segments
-from pudo.rules import evaluate_candidates, judge
+from pudo.measure import measure
+from pudo.rules import evaluate, evaluate_all
+from support import judge
 from shapely.geometry import LineString, box
 
 
@@ -21,36 +23,34 @@ def clear_map():
                    hydrants=[(100, 100)], buses=[(100, 100)], schools=[((400, 0), "학교")])
 
 
+SIDEWALK_KNOWN = ("A1",)   # 보도 자료가 아직 없어 '가능'을 보려면 A1 규칙을 끕니다
+
+
 class RuleTests(unittest.TestCase):
-    def test_modes_are_explicit_independent_and_do_not_mutate_inputs(self):
+    def test_child_zone_is_hard_fail_and_inputs_are_not_mutated(self):
         feature, data = candidate(), clear_map()
         data.schools = [((100, 0), "학교")]
         original_feature, original_data, original_thresholds = copy.deepcopy((feature, data, TH))
-        first = judge(feature, data, mode="strict")
-        lenient = judge(feature, data, mode="lenient")
-        last = judge(feature, data, mode="strict")
+        first, last = judge(feature, data), judge(feature, data)
         self.assertEqual(first, last)
         self.assertEqual(first["properties"]["verdict"], "불가")
-        self.assertEqual(lenient["properties"]["verdict"], "확인 필요")
-        self.assertEqual(lenient["properties"]["fail_reasons"], [])
-        self.assertEqual(len(lenient["properties"]["check_reasons"]), 1)
+        self.assertTrue(any(reason.startswith("H6") for reason in first["properties"]["fail_reasons"]))
         self.assertEqual((feature, data, TH), (original_feature, original_data, original_thresholds))
 
-    def test_lenient_does_not_relax_hydrant_rule(self):
+    def test_hydrant_rule_fails(self):
         data = clear_map()
         data.hydrants = [(1, 0)]
         data.intersection_area = box(3, -10, 20, 10)
-        for mode in ("strict", "lenient"):
-            result = judge(candidate(), data, mode=mode)["properties"]
-            self.assertEqual(result["verdict"], "불가")
-            self.assertTrue(any(reason.startswith("H4") for reason in result["fail_reasons"]))
+        result = judge(candidate(), data)["properties"]
+        self.assertEqual(result["verdict"], "불가")
+        self.assertTrue(any(reason.startswith("H4") for reason in result["fail_reasons"]))
 
     def test_threshold_and_coordinate_error_boundaries(self):
         for distance, expected in ((5, "불가"), (6, "확인 필요"), (12, "확인 필요"), (13, "가능")):
             with self.subTest(distance=distance):
                 data = clear_map()
                 data.hydrants = [(distance, 0)]
-                self.assertEqual(judge(candidate(), data)["properties"]["verdict"], expected)
+                self.assertEqual(judge(candidate(), data, rules_off=SIDEWALK_KNOWN)["properties"]["verdict"], expected)
 
     def test_unknown_data_requires_confirmation(self):
         data = clear_map()
@@ -92,8 +92,7 @@ class RuleTests(unittest.TestCase):
             with self.subTest(edge=edge):
                 data = clear_map()
                 data.intersection_area = box(edge, -10, edge + 20, 10) if edge > 0 else box(-5, -10, 15, 10)
-                for mode in ("strict", "lenient"):
-                    self.assertEqual(judge(candidate(), data, mode=mode)["properties"]["verdict"], expected)
+                self.assertEqual(judge(candidate(), data, rules_off=SIDEWALK_KNOWN)["properties"]["verdict"], expected)
         data = clear_map(); data.intersection_area = box(-5, -10, 15, 10)
         self.assertIn("H1 교차로 안 (도로교통법 제32조 1호)", judge(candidate(), data)["properties"]["fail_reasons"])
 
@@ -101,38 +100,55 @@ class RuleTests(unittest.TestCase):
         data = clear_map(); data.intersection_area = None
         self.assertIn("H1 교차로 데이터 없음", judge(candidate(), data)["properties"]["check_reasons"])
 
-    def test_invalid_mode_is_rejected(self):
-        with self.assertRaisesRegex(ValueError, "판정 모드"):
-            judge(candidate(), clear_map(), mode="unknown")
-
-    def test_combined_output_preserves_v0_mode_fields(self):
+    def test_evaluate_all_matches_single_evaluation(self):
         feature, data = candidate(), clear_map()
         data.schools = [((100, 0), "학교")]
-        strict = judge(feature, data, mode="strict")["properties"]
-        lenient = judge(feature, data, mode="lenient")["properties"]
-        result = evaluate_candidates([feature], data)["features"][0]["properties"]
-        self.assertEqual(result["verdict"], strict["verdict"])
-        self.assertEqual(result["checks"], strict["checks"])
-        self.assertEqual(result["needs_check"], strict["needs_check"])
-        self.assertEqual(result["verdict_lenient"], lenient["verdict"])
-        self.assertEqual(result["fail_reasons_lenient"], lenient["fail_reasons"])
-        self.assertEqual(result["check_reasons_lenient"], lenient["check_reasons"])
+        m = measure(feature, data)
+        self.assertEqual(evaluate_all([m])["features"][0], evaluate(m))
+
+    def test_rules_off_removes_only_that_rules_reasons(self):
+        feature, data = candidate(), clear_map()
+        data.schools = [((100, 0), "학교")]
+        result = judge(feature, data, rules_off=("H6", "A1"))["properties"]
+        self.assertEqual(result["verdict"], "가능")
+        self.assertEqual(result["rules_off"], ["A1", "H6"])
+        self.assertFalse(next(c for c in result["checks"] if c["item"] == "H6 어린이보호구역")["pass"])   # 근거는 남김
+
+
+class MeasurementTests(unittest.TestCase):
+    def test_measurement_does_not_depend_on_thresholds(self):
+        feature, data = candidate(), clear_map()
+        m = measure(feature, data)
+        self.assertEqual(round(m["hydrant"], 6), round(distance_to_points((0, 0), [(100, 100)]), 6))
+        strict = {**TH, "H4 소화전": 200}
+        self.assertEqual(judge(feature, data, thresholds=strict)["properties"]["verdict"], "불가")
+        self.assertEqual(measure(feature, data), m)
+
+    def test_unknown_lanes_and_sidewalk_stay_unknown(self):
+        feature = candidate()
+        feature["properties"].update(road_type="tertiary", lanes=2, lanes_source="default")
+        m = measure(feature, clear_map())
+        self.assertIsNone(m["lanes"]["value"]); self.assertIsNone(m["sidewalk"]["value"])
+        self.assertTrue(m["position"]["estimated"])
+        result = judge(feature, clear_map())["properties"]
+        self.assertIn("P1 차로 수 모름 (정밀도로지도·OSM에 없음)", result["check_reasons"])
+        self.assertIn("A1 보도 유무 모름 (사진 필요)", result["check_reasons"])
+        self.assertEqual(result["verdict"], "확인 필요")
 
 
 class DesignatedFacilityAndWidthTests(unittest.TestCase):
-    def test_tgis_zone_fails_but_facility_only_zone_needs_check_in_both_modes(self):
+    def test_tgis_zone_fails_but_facility_only_zone_needs_check(self):
         feature = candidate()
         data = clear_map(); data.child_zone = LineString([(-50, 0), (50, 0)])
         data.child_zone_evidence = [((10, 0), "노면 '어린이'")]
         self.assertEqual(judge(feature, data)["properties"]["verdict"], "불가")
         data = clear_map(); data.child_zone_facility = LineString([(-50, 0), (50, 0)])
         data.child_zone_evidence = [((0, 40), "지정 시설 어린이집 (어린이집)")]
-        for mode in ("strict", "lenient"):
-            result = judge(feature, data, mode=mode)["properties"]
-            self.assertEqual(result["verdict"], "확인 필요")
-            self.assertTrue(any(r.startswith("H6 어린이보호구역 지정 시설 (지정 시설 어린이집") for r in result["check_reasons"]))
-            check = next(c for c in result["checks"] if c["item"] == "H6 어린이보호구역")
-            self.assertIsNone(check["pass"])
+        result = judge(feature, data)["properties"]
+        self.assertEqual(result["verdict"], "확인 필요")
+        self.assertTrue(any(r.startswith("H6 어린이보호구역 지정 시설 (지정 시설 어린이집") for r in result["check_reasons"]))
+        check = next(c for c in result["checks"] if c["item"] == "H6 어린이보호구역")
+        self.assertIsNone(check["pass"])
 
     def one_lane(self, width):
         feature = candidate()

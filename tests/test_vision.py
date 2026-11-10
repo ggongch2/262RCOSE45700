@@ -6,7 +6,9 @@ from pathlib import Path
 
 from pudo.datasets import MapData
 from shapely.geometry import box
-from pudo.rules import evaluate_candidates, judge
+from pudo.measure import measure
+from pudo.rules import evaluate_all
+from support import judge as _judge
 from pudo.config import CENTER_LAT, CENTER_LON
 from pudo.vision import PhotoContractError, SCHEMA_VERSION, load_assessments, parse_assessments
 
@@ -30,9 +32,12 @@ def fixture(row=None, road_type="primary"):
                               "lanes_source": "hdmap", "heading": 90}}
     data = MapData(intersections=[(100, 100)], intersection_area=box(90, 90, 110, 110), crosswalks=[(100, 100)], hydrants=[(100, 100)],
                    buses=[(100, 100)], schools=[((400, 0), "학교")])
-    if row is not None:
-        data.photo_assessments = parse_assessments({"schema_version": SCHEMA_VERSION, "results": [row]})
+    data.photos = parse_assessments({"schema_version": SCHEMA_VERSION, "results": [row]}) if row is not None else {}
     return feature, data
+
+
+def judge(feature, data, **options):
+    return _judge(feature, data, photos=data.photos, **options)
 
 
 class PhotoContractTests(unittest.TestCase):
@@ -73,13 +78,14 @@ class PhotoContractTests(unittest.TestCase):
 
 
 class PhotoRuleTests(unittest.TestCase):
-    def test_no_photo_input_preserves_existing_behavior_and_fields(self):
+    def test_no_photo_input_leaves_sidewalk_unknown(self):
         feature, data = fixture()
         result = judge(feature, data)["properties"]
-        self.assertEqual(result["verdict"], "가능")
+        self.assertEqual(result["verdict"], "확인 필요")
+        self.assertEqual(result["check_reasons"], ["A1 보도 유무 모름 (사진 필요)"])
         self.assertNotIn("vision", result)
 
-    def test_sidewalk_observation_replaces_road_type_guess(self):
+    def test_sidewalk_observation_replaces_unknown(self):
         feature, data = fixture(road_type="residential")
         self.assertEqual(judge(feature, data)["properties"]["verdict"], "확인 필요")
         _, data = fixture(photo_row(), road_type="residential")
@@ -93,11 +99,10 @@ class PhotoRuleTests(unittest.TestCase):
     def test_negative_observations_add_failure_evidence(self):
         for name, value, prefix in (("sidewalk", False, "A1"), ("curb_blocked", True, "A2"), ("curb_line", "yellow_solid", "H5")):
             feature, data = fixture(photo_row(**{name: value}))
-            for mode in ("strict", "lenient"):
-                with self.subTest(name=name, mode=mode):
-                    result = judge(feature, data, mode=mode)["properties"]
-                    self.assertEqual(result["verdict"], "불가")
-                    self.assertTrue(any(reason.startswith(prefix) for reason in result["fail_reasons"]))
+            with self.subTest(name=name):
+                result = judge(feature, data)["properties"]
+                self.assertEqual(result["verdict"], "불가")
+                self.assertTrue(any(reason.startswith(prefix) for reason in result["fail_reasons"]))
 
     def test_low_confidence_cannot_promote_unknown_sidewalk(self):
         row = photo_row()
@@ -139,12 +144,13 @@ class PhotoRuleTests(unittest.TestCase):
             feature, data = fixture(photo_row(**{field: True}))
             self.assertEqual(judge(feature, data)["properties"]["verdict"], "확인 필요")
 
-    def test_both_modes_do_not_mutate_observation_inputs(self):
+    def test_evaluation_does_not_mutate_measurement_or_observation_inputs(self):
         feature, data = fixture(photo_row())
-        before = copy.deepcopy((feature, data))
-        result = evaluate_candidates([feature], data)
+        m = measure(feature, data)
+        before = copy.deepcopy((m, data.photos))
+        result = evaluate_all([m], photo_assessments=data.photos)
         self.assertEqual(result["features"][0]["properties"]["vision"]["status"], "applied")
-        self.assertEqual((feature, data), before)
+        self.assertEqual((m, data.photos), before)
 
 
 if __name__ == "__main__":

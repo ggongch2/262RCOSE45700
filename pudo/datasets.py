@@ -1,4 +1,4 @@
-"""지도·후보·거리뷰 메타데이터를 읽어 판정용 미터 좌표로 준비합니다."""
+"""준비 단계 입력: 지도·후보·거리뷰 메타데이터를 읽어 미터 좌표의 MapData로 만듭니다."""
 
 import csv
 import json
@@ -13,7 +13,6 @@ from shapely.geometry import shape
 
 from .config import CONTINUATION_TURN_DEG, require_files
 from .geo import to_meters
-from .vision import load_assessments, PhotoContractError
 from .zones import build_child_zone, zone_evidence
 
 
@@ -38,7 +37,6 @@ class MapData:
     hd_safe: list = field(default_factory=list)
     hd_link: list = field(default_factory=list)
     images: dict = field(default_factory=dict)
-    photo_assessments: dict = field(default_factory=dict)
 
 
 def read_json(path):
@@ -307,7 +305,8 @@ def load_map_data(data_dir, sv_dir):
     )
 
 
-def load_inputs(data_dir, sv_dir, *, photo_results=None):
+def load_inputs(data_dir, sv_dir):
+    """준비 단계 입력: (후보 Feature 목록, 지도 데이터 MapData). 사진 판독 결과는 판정 단계 입력이라 여기서 읽지 않습니다."""
     data_dir = Path(data_dir)
     require_files(
         data_dir / "layers_gangnam.json",
@@ -315,9 +314,4 @@ def load_inputs(data_dir, sv_dir, *, photo_results=None):
         data_dir / "candidates_v1.geojson",
     )
     candidates = load_candidates(data_dir / "candidates_v1.geojson")
-    map_data = load_map_data(data_dir, sv_dir)
-    if photo_results is not None:
-        map_data.photo_assessments = load_assessments(photo_results)
-        if map_data.photo_assessments.keys() - {feature["properties"]["id"] for feature in candidates}:
-            raise PhotoContractError("사진 판독 결과에 현재 후보 집합에 없는 candidate_id가 있습니다.")
-    return candidates, map_data
+    return candidates, load_map_data(data_dir, sv_dir)

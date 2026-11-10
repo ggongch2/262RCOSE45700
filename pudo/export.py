@@ -86,8 +86,6 @@ def print_summary(result):
         f"확인 필요 {verdicts['확인 필요']} ({100 * verdicts['확인 필요'] / max(1, n):.0f}%) / "
         f"불가 {verdicts['불가']} ({100 * verdicts['불가'] / max(1, n):.0f}%)"
     )
-    lenient = Counter(f["properties"]["verdict_lenient"] for f in features)
-    print(f"  완화(어린이보호구역→확인 필요): 가능 {lenient['가능']} / 확인 필요 {lenient['확인 필요']} / 불가 {lenient['불가']}")
     failures = Counter(
         " ".join(reason.split(" ")[:2]) for f in features for reason in f["properties"]["fail_reasons"]
     )

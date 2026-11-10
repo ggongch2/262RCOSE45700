@@ -6,6 +6,8 @@
 
 `web/pudo_v0_standalone.html`을 브라우저에서 엽니다. 후보와 판정 데이터가 내장되어 있어 Python 실행이나 API 키가 필요하지 않습니다. Leaflet CDN과 지도 타일을 불러오므로 인터넷 연결은 필요합니다.
 
+위쪽 **적용 규칙** 체크박스를 끄면 그 규칙(교차로, 횡단보도, 어린이보호구역 등)의 사유를 빼고 바로 다시 판정합니다. 끈 규칙 때문에 막혀 있던 곳은 굵은 테두리 초록 점으로 표시되고, 판정 필터의 "규칙 해제로 가능이 된 곳"으로 모아 볼 수 있습니다. 기준값(거리 m)을 바꾸려면 `pudo/config.py`의 `TH`를 고치고 파이프라인을 다시 실행합니다.
+
 `web/index.html`은 파이프라인이 생성하는 `web/pudo_v0_data.js`가 있어야 동작합니다. 승인·반려·메모는 해당 브라우저에 저장되며, GeoJSON 내보내기로 공유합니다.
 
 ## 개발 환경
@@ -31,6 +33,7 @@ Windows PowerShell에서는 `python -m venv .venv`, `.venv\Scripts\Activate.ps1`
 google_api=...
 mapillary_api=MLY|...
 vworld_api=...
+data_go_kr_api=...
 ```
 
 환경변수 → `.env` → `env` 순서로 읽으며, 다음 이름을 지원합니다. 파일은 실행 위치와 관계없이 저장소 루트에서 찾습니다.
@@ -40,8 +43,9 @@ vworld_api=...
 | Google Street View | `GOOGLE_MAPS_KEY` | `google_api` |
 | Mapillary | `MLY_TOKEN` | `mapillary_api` |
 | VWorld | `VWORLD_API_KEY` | `vworld_api` |
+| 공공데이터포털 (어린이보호구역 표준데이터) | `DATA_GO_KR_API_KEY` | `data_go_kr_api` |
 
-VWorld 키는 지도 다운로드에 사용합니다. `env`와 `.env`는 Git에서 제외합니다.
+VWorld 키는 지도 다운로드에, 공공데이터포털 키(일반 인증키 Decoding)는 어린이보호구역 지정 시설 수집에 사용합니다. 공공데이터포털 키가 없으면 해당 파일만 건너뜁니다. 팀 드라이브의 데이터 묶음을 쓰면 키 없이 판정까지 실행할 수 있습니다. `env`와 `.env`는 Git에서 제외합니다.
 
 ### 지도 데이터 준비
 
@@ -76,8 +80,11 @@ data/
 
 ```bash
 python -m pudo candidates   # → data/candidates_v1.geojson
-python -m pudo pipeline     # → data/pudo_v0.geojson, web/pudo_v0_data.js, 단독 데모 HTML
+python -m pudo prepare      # 준비: 후보별 측정값 → data/prepared/ (판정 없음)
+python -m pudo pipeline     # 판정 → data/pudo_v0.geojson, web/pudo_v0_data.js, 단독 데모 HTML
 ```
+
+처리는 세 단계로 나뉩니다. **수집**(`download`)은 원본을 받고, **준비**(`candidates`, `prepare`)는 후보 위치와 후보별 측정값(시설까지 거리, 보호구역 안/밖, 차로·폭 등)을 구하며, **판정**(`pipeline`)은 측정값에 기준값(`pudo/config.py`의 `TH`)과 규칙을 적용합니다. 준비는 기준값을 쓰지 않고, 데이터에 없는 값은 가정하지 않고 모름으로 둡니다. `pipeline`은 측정값이 없거나 입력보다 오래되었을 때만 준비를 다시 합니다.
 
 사진 판독 결과가 있으면 `--photo-results`로 함께 넣습니다. 파일은 [`schemas/photo-observations.v1.schema.json`](schemas/photo-observations.v1.schema.json) 형식을 따라야 하며, 파이프라인은 모델을 호출하지 않고 이 파일만 읽습니다. 관측값은 신뢰도가 `--photo-min-confidence`(기본 0.8, 임시 운영값) 이상일 때만 판정에 반영합니다.
 
@@ -105,11 +112,13 @@ pudo/             Python 구현
   geo.py          공통 좌표 변환·거리 계산
   download.py     OSM·VWorld 지도 수집, 시설 스냅샷 복원
   candidates.py   방향별 도로변 후보 생성
-  datasets.py     지도·후보·사진 메타데이터 로딩
-  rules.py        명시적 모드(strict/lenient)별 판정
+  datasets.py     준비 입력 로딩 (지도·후보·거리뷰 메타데이터 → MapData)
+  zones.py        어린이보호구역 구간 복원
+  measure.py      준비: 후보별 측정값 (지리 계산, 기준값 미사용)
+  rules.py        판정: 측정값 + 기준값 + 규칙 → 가능/확인 필요/불가
   vision.py       사진 판독 결과 검증과 판정 병합 (모델 호출 없음)
   export.py       GeoJSON·웹 파일 저장과 요약
-  pipeline.py     로딩 → 판정 → 출력 실행 흐름
+  pipeline.py     측정값 로딩(필요하면 준비) → 판정 → 출력
   streetview.py   Google 거리뷰 조회
   mapillary.py    Mapillary 커버리지 조사
   __main__.py     통합 CLI
@@ -129,7 +138,7 @@ tests/            설정 및 실행 회귀 검증
 
 ## 현재 구현 범위와 검증
 
-지도 기반 후보 생성·판정, 운영자 검토, GeoJSON 내보내기가 구현되어 있습니다. 사진 판독 결과를 받아 판정에 합치는 입력 계약도 구현되어 있습니다. 사진에서 이 결과를 만드는 VLM 판독 단계와 정답셋 평가는 후속 작업입니다. 교차로(H1)는 도로교통법 제32조 1·2호대로 교차로 안과 교차로 가장자리 5m를 금지하며, 교차로 면은 차도 폭으로 추정합니다. 어린이보호구역(H6, 제32조 8호)은 T-GIS 표지(시작·해제)와 노면 문자표시로 도로 구간을 복원한 추정값이며, T-GIS 파일이 없으면 학교 반경 300m 규칙으로 돌아갑니다. 공공데이터포털 어린이보호구역 지정 시설 목록이 있으면 시설 주변 도로를 표지 근거 없는 지정 시설 주변으로 보고 확인 필요로 둡니다. 편도 1차로 도로의 통과 폭(P1)은 지적도 폭과 도시계획시설 도로 등급의 법정 최소 폭을 함께 봅니다. 판정 결과에는 기본 모드와 보호구역 완화 모드(보호구역 불가 → 확인 필요)가 함께 들어갑니다. 임계값은 `pudo/config.py`의 `TH`에서 관리합니다.
+지도 기반 후보 생성·판정, 운영자 검토, GeoJSON 내보내기가 구현되어 있습니다. 사진 판독 결과를 받아 판정에 합치는 입력 계약도 구현되어 있습니다. 사진에서 이 결과를 만드는 VLM 판독 단계와 정답셋 평가는 후속 작업입니다. 교차로(H1)는 도로교통법 제32조 1·2호대로 교차로 안과 교차로 가장자리 5m를 금지하며, 교차로 면은 차도 폭으로 추정합니다. 어린이보호구역(H6, 제32조 8호)은 T-GIS 표지(시작·해제)와 노면 문자표시로 도로 구간을 복원한 추정값이며, T-GIS 파일이 없으면 학교 반경 300m 규칙으로 돌아갑니다. 공공데이터포털 어린이보호구역 지정 시설 목록이 있으면 시설 주변 도로를 표지 근거 없는 지정 시설 주변으로 보고 확인 필요로 둡니다. 편도 1차로 도로의 통과 폭(P1)은 지적도 폭과 도시계획시설 도로 등급의 법정 최소 폭을 함께 봅니다. 보호구역 구간 안은 항상 불가입니다. 차로 수와 보도는 자료가 없으면 가정하지 않고 모름(확인 필요)으로 둡니다. 임계값은 `pudo/config.py`의 `TH`에서 관리합니다.
 
 ```bash
 python -m unittest discover -s tests -v

@@ -147,7 +147,17 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(len(result["features"]), len(generated))
             self.assertEqual(result["features"][0]["properties"]["image_id"], "test-pano")
             self.assertIsNone(result["features"][1]["properties"]["image_id"])
-            self.assertTrue(any(f["properties"]["verdict"] != f["properties"]["verdict_lenient"] for f in result["features"]))
+            prepared = json.loads((data / "prepared" / "measurements.json").read_text())
+            self.assertEqual(prepared["schema_version"], "pudo-measure.v1")
+            self.assertEqual([m["id"] for m in prepared["candidates"]], [f["properties"]["id"] for f in generated])
+            self.assertTrue((data / "prepared" / "layers.json").is_file())
+            # 측정값은 입력이 바뀌었을 때만 다시 준비합니다.
+            from pudo.measure import is_stale
+            import os, time
+            self.assertFalse(is_stale(data, sv))
+            later = time.time() + 5
+            os.utime(data / "candidates_v1.geojson", (later, later))
+            self.assertTrue(is_stale(data, sv))
             for source, judged in zip(generated, result["features"]):
                 self.assertEqual(judged["geometry"], source["geometry"])
                 self.assertEqual(judged["properties"]["id"], source["properties"]["id"])

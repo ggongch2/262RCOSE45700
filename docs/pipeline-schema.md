@@ -5,16 +5,37 @@
 ## 처리 구조
 
 ```text
-data/ + sv_out/metadata.csv (+ 선택: --photo-results 사진 판독 JSON)
-       ↓ datasets.load_inputs
-후보 Feature 목록 + MapData (판정용 미터 좌표)
-       ↓ rules.evaluate_candidates
-후보별 judge(..., mode="strict") / judge(..., mode="lenient")
+[준비] data/ + sv_out/metadata.csv
+       ↓ datasets.load_inputs → 후보 Feature 목록 + MapData (미터 좌표)
+       ↓ measure.measure_all   ← 지리 계산은 여기서만. 기준값 미사용, 모르면 null
+       data/prepared/measurements.json (pudo-measure.v1) + data/prepared/layers.json
+[판정] 측정값 (+ 선택: --photo-results 사진 판독 JSON)
+       ↓ rules.evaluate_all(thresholds=TH, rules_off=())   ← 파일·지리 계산 없음
        ↓ export.write_results
-pudo_v0.geojson / pudo_v0_data.js / pudo_v0_standalone.html
+       pudo_v0.geojson / pudo_v0_data.js / pudo_v0_standalone.html
 ```
 
-`pipeline.run_pipeline`은 이 순서를 연결합니다. 규칙 함수는 파일 읽기·쓰기 없이 전달받은 후보와 `MapData`를 사용합니다. 거리 계산은 `geo.py`에 있습니다. `MapData`는 Python 내부 로딩 결과이며 외부 파일의 공통 스키마가 아닙니다.
+`pipeline.run_pipeline`은 측정값을 읽고(없거나 입력보다 오래되면 `measure.prepare`로 다시 만들고) 판정과 저장을 연결합니다. 구분 기준은 "운영 기준이 바뀌면 이 값도 바뀌나"입니다. 바뀌면 판정(`rules.py`), 데이터가 바뀌어야만 바뀌면 준비(`measure.py`)입니다.
+
+### 측정값 (`data/prepared/measurements.json`)
+
+`{schema_version: "pudo-measure.v1", generated_at, count, candidates: [...]}`. 후보 하나의 필드입니다. 거리는 m이며 null은 모름(자료 없음)입니다.
+
+| 필드 | 내용 |
+|---|---|
+| `id`, `coordinates`, `heading`, `side`, `centerline` | 후보 식별·위치 |
+| `road` | `{name, type, osm_way, oneway}` |
+| `position` | `{estimated: true, offset_m, basis}`. 연석 위치는 중심선에서 옮긴 추정값이며 `basis`는 옮긴 근거(정밀도로지도 차로 수 / OSM 차로 수 / 지적도 도로 폭 / 근거 없음) |
+| `lanes` | `{value, source}`. 정밀도로지도·OSM에 없으면 value null |
+| `width` | `{value, source}`. 지적도 도로 필지 폭(보도 포함) |
+| `planned_road` | `{grade, min_width}` 또는 null. 도시계획시설 도로 등급 |
+| `sidewalk` | `{value, source}`. 현재 자료 없음 → null (사진 판독 결과가 판정에서 반영) |
+| `intersection` | `{inside, distance, estimated: true}`. 교차로 면 안 여부와 가장자리까지 거리 |
+| `crosswalk`, `bus_stop`, `hydrant` | 가장 가까운 시설까지 거리 |
+| `child_zone` | `{mode: "tgis", state: in/near/out, label}` 또는 `{mode: "radius", distance, label}` |
+| `safety_zone` | `{covered, distance}`. 정밀도로지도 안전지대 |
+| `reg_line` | `{tgis_no_stop, tgis_no_park, hd_covered, hd_no_stop, hd_bus, hd_no_park}`. 규제선까지 거리 |
+| `image` | `{pano_id}` 또는 null. 후보 ID와 조회 좌표가 맞는 Google 사진 |
 
 ## 원본 입력
 
@@ -32,7 +53,7 @@ pudo_v0.geojson / pudo_v0_data.js / pudo_v0_standalone.html
 
 외부 입력마다 구조가 다르며, 로더가 판정에 필요한 좌표와 속성으로 변환합니다. 외부 GeoJSON 좌표는 `[경도, 위도]`의 WGS84이며, `MapData`의 점·선은 강남역 기준 근사 미터 좌표입니다. 웹 지도 중심 `PUDO_META.center`만 Leaflet 형식인 `[위도, 경도]`입니다.
 
-H6 어린이보호구역은 세 단계 근거를 씁니다. T-GIS 표지·노면 문자로 복원한 구간 안이면 보호구역 안(기본 모드 불가, 완화 모드 확인 필요)입니다. 지정 시설 목록(`child_protection_zones.json`, 없으면 `child_protection_zones.csv`)이 있으면 시설 좌표를 70m 안의 가장 가까운 도로에 붙여 150m까지 퍼진 도로를 따로 만들고, 그 안의 후보는 두 모드 모두 확인 필요로 둡니다. 정문 위치와 지정 범위를 몰라 간선도로까지 번질 수 있기 때문입니다. T-GIS 파일이 없으면 대상시설 반경 300m 규칙으로 돌아갑니다.
+H6 어린이보호구역은 세 단계 근거를 씁니다. T-GIS 표지·노면 문자로 복원한 구간 안이면 보호구역 안(항상 불가)입니다. 지정 시설 목록(`child_protection_zones.json`, 없으면 `child_protection_zones.csv`)이 있으면 시설 좌표를 70m 안의 가장 가까운 도로에 붙여 150m까지 퍼진 도로를 따로 만들고, 그 안의 후보는 확인 필요로 둡니다. 정문 위치와 지정 범위를 몰라 간선도로까지 번질 수 있기 때문입니다. T-GIS 파일이 없으면 대상시설 반경 300m 규칙으로 돌아갑니다.
 
 P1 통과 폭(편도 1차로 양방향 도로)은 지적도 도로 필지 폭과 도시계획시설 도로 등급의 법정 최소 폭(「도시·군계획시설의 결정·구조 및 설치기준에 관한 규칙」 제9조)을 함께 봅니다. 등급은 도로 중심점과 진행 방향 앞뒤 10m가 모두 같은 면 안에 있을 때만 그 도로의 것으로 봅니다. 지적도 폭이 없으면 등급 하한으로 채우고, 지적도 폭은 기준 미달인데 등급 하한은 기준 이상이면 불가 대신 자료 불일치(확인 필요)로 둡니다. 소로 3류(8m 미만)는 하한이 없어 폭 근거로 쓰지 않습니다. 판정 출력의 `map.planned_road`에 등급명을 남깁니다.
 
@@ -94,7 +115,7 @@ H1은 교차로 면까지의 거리로 판정합니다(면 안이면 제32조 1�
 | `curb_line` | V1 사진 규제선 | 황색 실선·복선이면 불가. 그 외 값이면 지도 규제선 자료 불일치를 해소. 단 버스전용차로 확인 사유는 유지 |
 | `construction`, `occupied` | V2 공사, V3 일시적 점유 | 있음이면 확인 필요 |
 
-사진은 지도 판정의 불가 사유를 지우지 않습니다. 지도는 규제선으로 불가인데 사진에는 금지선이 없으면 불가를 유지하고 불일치 사유를 추가합니다. `map.curb_line`은 지도 기준 값으로 남고 사진 값은 `vision`과 `checks`에만 들어갑니다. 기본·완화 두 모드 모두 같은 사진 결과를 사용합니다.
+사진은 지도 판정의 불가 사유를 지우지 않습니다. 지도는 규제선으로 불가인데 사진에는 금지선이 없으면 불가를 유지하고 불일치 사유를 추가합니다. `map.curb_line`은 지도 기준 값으로 남고 사진 값은 `vision`과 `checks`에만 들어갑니다.
 
 ## 지도 판정 → 웹 / GeoJSON 내보내기
 
@@ -110,15 +131,12 @@ H1은 교차로 면까지의 거리로 판정합니다(면 안이면 제32조 1�
 | `map` | 아래의 지도 속성 객체 |
 | `image_id`, `image_source`, `captured_at` | string / null |
 | `review`, `note`, `reviewed_at` | string / null, 자동 판정 시 null |
-| `verdict_lenient` | 완화 모드의 판정 |
-| `fail_reasons_lenient`, `check_reasons_lenient` | 완화 모드의 사유 배열 |
+| `rules_off` | 판정에서 뺀 규칙 코드 배열 (기본 판정은 빈 배열) |
 | `vision` | 사진 결과가 있는 후보에만 존재. 입력 행 + `schema_version`, `min_confidence`, `status`(`applied` / `review` / `rejected`), `used_fields`, `review_reasons` |
 
 `checks[]` 객체는 `{item: string, value: string|null, threshold: string, pass: boolean|null, estimated: boolean}`입니다. `value`와 `threshold`는 화면 표시용 문자열이며, 모든 거리·조건을 기계 판독용 수치로 제공하는 구조는 아닙니다.
 
-`map` 필드는 `dist_intersection_m: number|null`, `lanes: integer`, `lanes_estimated: boolean`, `road_width_m: number|null`, `curb_line: string`, `school_zone: boolean`입니다. 현재 `curb_line`은 `yellow_solid`, `yellow_dashed`, `unknown` 중 하나입니다.
-
-기본 모드가 일반 필드의 기준입니다. `evaluate_candidates`는 완화 모드의 판정·사유 세 필드만 `_lenient` 이름으로 덧붙입니다. `checks`, `needs_check`, `score`, `map`은 기본 모드 결과입니다. `judge(..., mode="lenient")`를 직접 호출하면 완화 모드 전체 결과를 받을 수 있습니다.
+`map` 필드는 `dist_intersection_m: number|null`, `lanes: integer|null`(모르면 null), `road_width_m: number|null`, `planned_road: string|null`, `curb_line: string`, `position_basis: string`입니다. 현재 `curb_line`은 `yellow_solid`, `yellow_dashed`, `unknown` 중 하나입니다.
 
 웹은 GeoJSON과 동일한 내용을 `const PUDO`로 읽습니다. 검토 데이터는 브라우저에서 ID별 `{review, note, at}`로 보관하고, 내보낼 때 properties의 `review`, `note`, `reviewed_at`으로 변환합니다.
 

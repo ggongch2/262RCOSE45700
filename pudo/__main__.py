@@ -8,7 +8,8 @@ from .config import API_KEY_NAMES, DATA_DIR, ROOT, api_key
 COMMANDS = {
     "download": ("download", "OSM·VWorld 지도 수집 및 시설 스냅샷 복원"),
     "candidates": ("candidates", "도로망에서 승하차 후보 생성"),
-    "pipeline": ("pipeline", "지도 기반 판정 및 웹 데이터 생성"),
+    "prepare": ("measure", "준비: 후보별 측정값 생성 (판정 없음)"),
+    "pipeline": ("pipeline", "기본 조건으로 판정 결과와 웹 데이터 생성 (측정값은 필요할 때만 다시 준비)"),
     "streetview": ("streetview", "Google 거리뷰 메타데이터 조회"),
     "mapillary": ("mapillary", "Mapillary 커버리지 조사"),
 }
