@@ -145,11 +145,12 @@ addOverlay('버스정류장', '#9775fa', overlay('bus', {color:'#6741d9', fillCo
 addOverlay('소화전', '#ff6b6b', overlay('hydrant', {color:'#c92a2a', fillColor:'#ff6b6b', fillOpacity:1, weight:1, radius:3}), false);
 L.control.layers({'브이월드 지도': vworld, '브이월드 위성': vworldSat, 'OSM (서버로 열 때만)': osm}, overlays, {collapsed:false, position:'topright'}).addTo(map);
 
+// 규칙 목록은 처음 불러온 판정(기본 조건)에 나온 규칙 코드로 한 번만 만듭니다.
+// 끈 규칙은 서버 판정 결과에서 사유가 빠지므로, 매번 결과에서 다시 만들면 목록에서 사라집니다.
+const PRESENT = new Set(off);
+PUDO.features.forEach(f => [...f.properties.fail_reasons, ...f.properties.check_reasons].forEach(r => PRESENT.add(code(r))));
 function drawRules() {
-  const present = new Set();
-  PUDO.features.forEach(f => { const p = f.properties;
-    [...p.fail_reasons, ...p.check_reasons].forEach(r => present.add(code(r))); });
-  const keys = Object.keys(RULES).filter(k => present.has(k));
+  const keys = Object.keys(RULES).filter(k => PRESENT.has(k));
   $('rules').innerHTML = `<b>적용 규칙</b>` + keys.map(k => `<label class="${off.has(k) ? 'off' : ''}"><input type="checkbox" data-rule="${k}" ${off.has(k) ? '' : 'checked'}> ${k} ${esc(RULES[k])}</label>`).join('')
     + ` <button id="rulesAll">모두 적용</button>`;
   $('rules').querySelectorAll('input[data-rule]').forEach(box => box.onchange = () => {
