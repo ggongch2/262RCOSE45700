@@ -2,32 +2,72 @@
 
 실전SW프로젝트 (카카오모빌리티 × 고려대). 강남역 반경 500m의 도로변 후보를 지도 데이터로 판정하고, 운영자가 근거를 검토해 승인·반려하는 v0 프로토타입입니다.
 
-## 먼저 데모 보기
+## 빠른 시작: 담당자 화면 켜기
 
-`web/pudo_v0_standalone.html`을 브라우저에서 엽니다. 후보와 판정 데이터가 내장되어 있어 Python 실행이나 API 키가 필요하지 않습니다. Leaflet CDN과 지도 타일을 불러오므로 인터넷 연결은 필요합니다.
+처음 한 번은 1~4단계를 모두 하고, 그다음부터는 5단계만 하면 됩니다. 명령은 모두 **저장소 폴더**(`pyproject.toml`이 있는 곳)에서 실행합니다. Windows PowerShell 기준이며, macOS·Linux는 괄호 안의 명령을 씁니다.
 
-위쪽 **적용 규칙** 체크박스를 끄면 그 규칙(교차로, 횡단보도, 어린이보호구역 등)의 사유를 빼고 바로 다시 판정합니다. 끈 규칙 때문에 막혀 있던 곳은 굵은 테두리 초록 점으로 표시되고, 판정 필터의 "규칙 해제로 가능이 된 곳"으로 모아 볼 수 있습니다. 기준값(거리 m)을 바꾸려면 `pudo/config.py`의 `TH`를 고치고 파이프라인을 다시 실행합니다.
+**1. 코드 받기**
 
-`web/index.html`은 파이프라인이 생성하는 `web/pudo_v0_data.js`가 있어야 동작합니다. 승인·반려·메모는 해당 브라우저에 저장되며, GeoJSON 내보내기로 공유합니다.
+```powershell
+git pull
+```
+
+**2. 데이터 넣기**
+
+팀 드라이브의 `PUDO_data_YYYYMMDD.zip`을 저장소 폴더에 두고 압축을 풉니다. 저장소 폴더 바로 아래에 `data\` 폴더가 생겨야 합니다(`PUDO_data_...\data\`처럼 한 단계 더 들어가면 안 됩니다). 공유 묶음에는 수집한 원본만 들어 있고, 후보와 측정값은 4·5단계에서 만듭니다.
+
+**3. 설치 (처음 한 번)**
+
+```powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1          # (macOS·Linux: source .venv/bin/activate)
+python -m pip install -e .
+```
+
+- 성공하면 프롬프트 앞에 `(.venv)`가 붙습니다. **터미널을 새로 열 때마다 `.venv\Scripts\Activate.ps1`을 다시 실행**해야 합니다. 이걸 빼먹으면 `No module named 'numpy'` 같은 오류가 납니다.
+- `Activate.ps1`이 "스크립트를 실행할 수 없습니다"로 막히면 `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`를 한 번 실행한 뒤 다시 시도합니다.
+- Python 3.11 이상이 필요합니다(`python --version`).
+
+**4. 후보 만들기 (데이터를 새로 받았을 때 한 번)**
+
+```powershell
+python -m pudo candidates
+python -m pudo check              # data\ 파일이 모두 "있음"인지 확인
+```
+
+**5. 화면 켜기**
+
+```powershell
+python -m pudo serve
+```
+
+브라우저가 `http://127.0.0.1:8000`으로 자동으로 열립니다. 처음 켤 때는 후보별 측정값을 계산하느라 몇 초 걸립니다. 끌 때는 터미널에서 `Ctrl+C`를 누릅니다. 이 주소는 자기 컴퓨터에서만 열립니다.
+
+### 화면에서 하는 일
+
+- **적용 규칙**: 체크를 끄면 그 규칙(교차로, 횡단보도, 어린이보호구역, 보도 등)을 빼고 다시 판정합니다. 끈 규칙 때문에 막혀 있던 곳은 굵은 테두리 초록 점으로 표시되고, 판정 필터의 "규칙 해제로 가능이 된 곳"으로 모아 볼 수 있습니다.
+- **기준값 바꾸기**: 펼쳐서 거리 기준(횡단보도 10m, 소화전 5m, 통과 폭 5.5m 등)을 바꾸면 Python이 바로 다시 판정합니다. 바꾼 칸은 파란 테두리로 표시되고, "기본값으로"로 되돌립니다.
+- **현재 조건 HTML 저장**: 지금 조건의 결과를 서버 없이 열리는 파일 하나로 내려받습니다. 결과를 팀원이나 멘토에게 보낼 때 씁니다.
+- 지도의 점을 누르면 항목별 값·기준·결과와 불가·확인 사유가 나옵니다. 승인·반려·메모는 그 브라우저에 저장되고 "GeoJSON 내보내기"로 파일에 담깁니다.
+
+`web/pudo_v0_standalone.html`(또는 저장한 결과 HTML)을 그냥 열면 서버 없이 결과를 볼 수 있습니다. 이때는 규칙 켜고 끄기만 되고 기준값은 바꿀 수 없습니다.
+
+### 자주 나는 오류
+
+| 메시지 | 원인과 해결 |
+|---|---|
+| `No module named 'numpy'` (또는 `shapely`, `dotenv`) | 가상환경이 꺼져 있거나 설치를 안 했습니다. `.venv\Scripts\Activate.ps1` 후 `python -m pip install -e .` |
+| `invalid choice: 'serve'` | 코드가 예전 버전입니다. `git pull` |
+| `필요한 입력 파일이 없습니다` | 2단계 데이터 압축 위치를 확인하고, 4단계 `python -m pudo candidates`를 실행합니다 |
+| `포트 8000을 열 수 없습니다` | 이미 켜져 있는 창을 쓰거나 `python -m pudo serve --port 8001` |
 
 ## 개발 환경
 
-Python 3.11 이상. 저장소 루트에서 실행합니다.
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -e .
-python -m pudo check
-```
-
-Windows PowerShell에서는 `python -m venv .venv`, `.venv\Scripts\Activate.ps1`로 가상환경을 만들고 활성화한 뒤 같은 설치 명령을 실행합니다.
-
-`check`는 API 키 설정 여부와 필요한 파일의 존재 여부만 출력합니다. 키 값은 출력하지 않고, 외부 API를 호출하지 않습니다.
+설치는 위 3단계와 같습니다. `python -m pudo check`는 API 키 설정 여부와 필요한 파일의 존재 여부만 출력합니다. 키 값은 출력하지 않고, 외부 API를 호출하지 않습니다. 테스트는 `python -m unittest discover -s tests`로 실행합니다.
 
 ### API 키
 
-이미 전달받은 루트 `env` 파일을 그대로 사용합니다. 새 환경에서는 `.env.example`을 `.env`로 복사하고 값을 입력합니다.
+API 키는 데이터를 새로 수집할 때(`python -m pudo download`, `streetview`, `mapillary`)만 필요합니다. 화면을 켜고 판정하는 데는 필요 없습니다. 이미 전달받은 루트 `env` 파일을 그대로 사용합니다. 새 환경에서는 `.env.example`을 `.env`로 복사하고 값을 입력합니다.
 
 ```dotenv
 google_api=...
@@ -81,7 +121,8 @@ data/
 ```bash
 python -m pudo candidates   # → data/candidates_v1.geojson
 python -m pudo prepare      # 준비: 후보별 측정값 → data/prepared/ (판정 없음)
-python -m pudo pipeline     # 판정 → data/pudo_v0.geojson, web/pudo_v0_data.js, 단독 데모 HTML
+python -m pudo pipeline     # 기본 조건 판정 → data/pudo_v0.geojson, web/pudo_v0_data.js, 단독 데모 HTML
+python -m pudo serve        # 담당자 화면: 조건을 바꿔 가며 판정 (127.0.0.1 전용)
 ```
 
 처리는 세 단계로 나뉩니다. **수집**(`download`)은 원본을 받고, **준비**(`candidates`, `prepare`)는 후보 위치와 후보별 측정값(시설까지 거리, 보호구역 안/밖, 차로·폭 등)을 구하며, **판정**(`pipeline`)은 측정값에 기준값(`pudo/config.py`의 `TH`)과 규칙을 적용합니다. 준비는 기준값을 쓰지 않고, 데이터에 없는 값은 가정하지 않고 모름으로 둡니다. `pipeline`은 측정값이 없거나 입력보다 오래되었을 때만 준비를 다시 합니다.
@@ -119,6 +160,7 @@ pudo/             Python 구현
   vision.py       사진 판독 결과 검증과 판정 병합 (모델 호출 없음)
   export.py       GeoJSON·웹 파일 저장과 요약
   pipeline.py     측정값 로딩(필요하면 준비) → 판정 → 출력
+  server.py       담당자 화면 로컬 서버 (화면의 조건 → rules.py 판정 → 결과)
   streetview.py   Google 거리뷰 조회
   mapillary.py    Mapillary 커버리지 조사
   __main__.py     통합 CLI
