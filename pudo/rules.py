@@ -3,6 +3,8 @@
 import math
 from typing import Literal
 
+from shapely.geometry import Point
+
 from .config import TH
 from .datasets import MapData
 from .geo import distance_to_area, distance_to_lines, distance_to_points, distance_to_segments, to_meters
@@ -20,18 +22,51 @@ def _within(distance, limit):
 
 
 def _child_zone(pr, p, data, th):
-    """(구간 안인가, 표시 정보). T-GIS 추정 구간이 있으면 그것을, 없으면 대상시설 반경을 씁니다."""
-    if data.child_zone is not None:
+    """(상태, 표시 정보). 상태: "in" 보호구역 안, "near" 지정 시설 주변(구간 미확인), "out" 밖.
+
+    T-GIS 추정 구간이 있으면 그것을, 없으면 대상시설 반경을 씁니다. 지정 시설 주변 도로는 표지 근거가 없어
+    구간 안으로 단정하지 않습니다.
+    """
+    if data.child_zone is not None or data.child_zone_facility is not None:
         road = to_meters(*pr["centerline"]) if pr.get("centerline") else p
-        inside = distance_to_area(road, data.child_zone) <= 1.0
-        near = min(((math.hypot(p[0] - x, p[1] - y), label) for (x, y), label in data.child_zone_evidence), default=(None, None))
-        evidence = f"근거 {near[1]} {near[0]:.0f}m" if near[0] is not None else "근거 없음"
-        value = f"구간 안 ({evidence})" if inside else "구간 밖"
-        return inside, {"mode": "tgis", "value": value, "reason": f"추정 구간 안, {evidence}"}
+
+        def nearest(prefix):
+            found = [(math.hypot(p[0] - x, p[1] - y), label) for (x, y), label in data.child_zone_evidence
+                     if label.startswith("지정 시설") == prefix]
+            return min(found, default=(None, None))
+
+        if data.child_zone is not None and distance_to_area(road, data.child_zone) <= 1.0:
+            near = nearest(False)
+            evidence = f"근거 {near[1]} {near[0]:.0f}m" if near[0] is not None else "근거 없음"
+            return "in", {"mode": "tgis", "value": f"구간 안 ({evidence})", "reason": f"추정 구간 안, {evidence}"}
+        if data.child_zone_facility is not None and distance_to_area(road, data.child_zone_facility) <= 1.0:
+            near = nearest(True)
+            label = f"{near[1]} {near[0]:.0f}m" if near[0] is not None else "지정 시설"
+            return "near", {"mode": "tgis", "value": f"{label}, 표지 근거 없음",
+                            "reason": f"{label} 주변, 보호구역 범위 미확인 → 표지·사진 확인"}
+        return "out", {"mode": "tgis", "value": "구간 밖", "reason": ""}
     sch = min(((math.hypot(p[0] - s[0], p[1] - s[1]), nm) for s, nm in data.schools), default=(None, None))
     inside = sch[0] is not None and sch[0] <= th["H6 학교"]
     value = f"{sch[1]} {sch[0]:.0f}m" if sch[0] is not None else None
-    return inside, {"mode": "radius", "value": value, "reason": f"{sch[1]} {sch[0]:.0f}m, 임시 버퍼" if inside else ""}
+    return ("in" if inside else "out"), {"mode": "radius", "value": value, "reason": f"{sch[1]} {sch[0]:.0f}m, 임시 버퍼" if inside else ""}
+
+
+def _planned_road(pr, p, data):
+    """후보 도로가 속한 도시계획시설 도로 (등급명, 최소 폭). 없으면 (None, None).
+
+    교차로에서는 가로지르는 도로의 면에 걸리기 쉬워, 도로 중심점과 진행 방향 앞뒤 10m가
+    모두 같은 면 안에 있을 때만 그 도로의 등급으로 봅니다.
+    """
+    if not data.planned_roads:
+        return None, None
+    center = to_meters(*pr["centerline"]) if pr.get("centerline") else p
+    along = math.radians((pr.get("heading", 0) - 90) % 360)   # heading은 진행 방향 우측(연석 쪽)
+    dx, dy = math.sin(along) * 10, math.cos(along) * 10
+    probes = [Point(center), Point(center[0] + dx, center[1] + dy), Point(center[0] - dx, center[1] - dy)]
+    for area, grade, min_width in data.planned_roads:
+        if all(area.contains(probe) for probe in probes):
+            return grade, min_width
+    return None, None
 
 
 def judge(f, data: MapData, *, mode: Mode = "strict", thresholds=None, photo_min_confidence=0.8):
@@ -64,14 +99,17 @@ def judge(f, data: MapData, *, mode: Mode = "strict", thresholds=None, photo_min
     dist_rule("H3 정류장", distance_to_points(p, data.buses), th["H3 정류장"])
     dist_rule("H4 소화전", distance_to_points(p, data.hydrants), th["H4 소화전"])
     # ① 합법 — 어린이보호구역 (도로교통법 제32조 8호, 2021.10.21부터 주정차 금지)
-    in_zone, zone_note = _child_zone(pr, p, data, th)
+    zone_state, zone_note = _child_zone(pr, p, data, th)
+    in_zone = zone_state == "in"
     zone_item = dict(item="H6 어린이보호구역", estimated=True)
     if zone_note["mode"] == "tgis":
-        zone_item.update(value=zone_note["value"], threshold="보호구역 구간 밖 (T-GIS 표지·노면표시로 추정)", **{"pass": not in_zone})
+        zone_item.update(value=zone_note["value"], threshold="보호구역 구간 밖 (T-GIS 표지·노면표시로 추정)",
+                         **{"pass": {"in": False, "near": None, "out": True}[zone_state]})
     else:
         zone_item.update(value=zone_note["value"], threshold=f"대상시설 {th['H6 학교']}m 밖 (지정 구간 미확인)", **{"pass": not in_zone})
     checks.append(zone_item)
     if in_zone: (needs if lenient else fails).append(f"H6 어린이보호구역 ({zone_note['reason']}{' → 확인 필요' if lenient else ''})")
+    elif zone_state == "near": needs.append(f"H6 어린이보호구역 지정 시설 ({zone_note['reason']})")
     # ① 합법 — 안전지대 사방 10m (정밀도로지도 531). 지도가 없는 도로는 판정 불가(null)
     if data.hd_safe and _within(distance_to_segments(p, data.hd_link), 15):
         d_sz = distance_to_segments(p, data.hd_safe)
@@ -102,17 +140,31 @@ def judge(f, data: MapData, *, mode: Mode = "strict", thresholds=None, photo_min
     # ② 물리 — 잔여 차로
     lanes = pr["lanes"]; lanes_est = pr.get("lanes_source") == "default"
     width = pr.get("road_width_m")
+    planned_grade, planned_min = _planned_road(pr, p, data)
     oneway = str(pr.get("oneway", "no")).lower() in ("yes", "true", "1", "-1")
     if oneway or lanes >= 2:
         checks.append(dict(item="P1 잔여 차로", value=f"{'일방통행' if oneway else f'편도 {lanes}차로'}", threshold="편도 2차로 이상 또는 일방통행", **{"pass": True}, estimated=lanes_est and not oneway))
         if lanes_est and not oneway: needs.append("P1 차로 수가 추정값")
-    elif width is not None:
-        ok = width >= th["P1 통과폭"]
-        checks.append(dict(item="P1 통과 폭", value=f"도로 땅 폭 {width:.1f}m (보도 포함)", threshold=f"{th['P1 통과폭']}m 이상", **{"pass": ok}, estimated=True))
-        if not ok: fails.append(f"P1 통과 폭 부족 ({width:.1f}m, 편도 1차로 양방향)")
-        else: needs.append("P1 폭이 보도 포함 지적도 값 (추정)")
     else:
-        checks.append(dict(item="P1 통과 폭", value=None, threshold=f"{th['P1 통과폭']}m 이상", **{"pass": None}, estimated=True)); needs.append("P1 도로 폭 없음 (단지 내 통로일 수 있음)")
+        # 폭 근거: 지적도 도로 필지 폭(실측 추정)과 도시계획시설 도로 등급(법정 최소 폭). 둘 다 보도 포함 폭입니다.
+        need = th["P1 통과폭"]; threshold = f"{need}m 이상"
+        planned_ok = planned_min is not None and planned_min >= need
+        planned_text = f"도시계획 {planned_grade} ({planned_min}m 이상)" if planned_grade else None
+        if width is not None and width >= need:
+            value = f"도로 땅 폭 {width:.1f}m (보도 포함)" + (f", {planned_text}" if planned_text else "")
+            checks.append(dict(item="P1 통과 폭", value=value, threshold=threshold, **{"pass": True}, estimated=True))
+            needs.append("P1 폭이 보도 포함 지적도 값 (추정)")
+        elif width is not None and planned_ok:
+            checks.append(dict(item="P1 통과 폭", value=f"지적도 {width:.1f}m / {planned_text}", threshold=threshold, **{"pass": None}, estimated=True))
+            needs.append(f"P1 폭 자료 불일치 (지적도 {width:.1f}m, {planned_text}) → 사진 확인")
+        elif width is not None:
+            checks.append(dict(item="P1 통과 폭", value=f"도로 땅 폭 {width:.1f}m (보도 포함)" + (f", {planned_text}" if planned_text else ""), threshold=threshold, **{"pass": False}, estimated=True))
+            fails.append(f"P1 통과 폭 부족 ({width:.1f}m, 편도 1차로 양방향)")
+        elif planned_ok:
+            checks.append(dict(item="P1 통과 폭", value=f"{planned_text}, 보도 포함", threshold=threshold, **{"pass": True}, estimated=True))
+            needs.append(f"P1 폭이 도시계획 등급 하한 ({planned_grade}, 지적도 폭 없음)")
+        else:
+            checks.append(dict(item="P1 통과 폭", value=planned_text, threshold=threshold, **{"pass": None}, estimated=True)); needs.append("P1 도로 폭 없음 (단지 내 통로일 수 있음)")
     # ③ 승객 접근 — 보도
     sw = SIDEWALK_DEFAULT.get(pr["road_type"])
     checks.append(dict(item="A1 보도", value={True: "있음 (도로 유형 추정)", None: "모름"}[sw], threshold="보도 있음", **{"pass": sw}, estimated=True))
@@ -145,7 +197,7 @@ def judge(f, data: MapData, *, mode: Mode = "strict", thresholds=None, photo_min
         "properties": {
             "id": pr["id"], "name": pr.get("name", ""), "road_type": pr["road_type"], "oneway": oneway, "heading": pr["heading"], "side": pr.get("side"), "centerline": pr.get("centerline"),
             "verdict": verdict, "score": score, "needs_check": bool(needs), "fail_reasons": fails, "check_reasons": needs, "checks": checks,
-            "map": {"dist_intersection_m": round(d_int, 1) if d_int is not None else None, "lanes": lanes, "lanes_estimated": lanes_est, "road_width_m": width, "curb_line": curb, "school_zone": in_zone},
+            "map": {"dist_intersection_m": round(d_int, 1) if d_int is not None else None, "lanes": lanes, "lanes_estimated": lanes_est, "road_width_m": width, "planned_road": planned_grade, "curb_line": curb, "school_zone": in_zone},
             "image_id": img["pano_id"] if img else None, "image_source": "google" if img else None, "captured_at": None,   # 촬영일은 저장하지 않음 (구글 정책)
             "review": None, "note": None, "reviewed_at": None, "curb_offset_m": pr.get("curb_offset_m"),
         },

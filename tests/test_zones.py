@@ -40,6 +40,15 @@ class ZoneTests(unittest.TestCase):
         zone = build_child_zone(self.roads, [((-350, 0), "노면 '어린이'"), ((350, 0), "노면 '어린이'")], [])
         self.assertFalse(covered(zone, 0, 0))
 
+    def test_designated_facility_snaps_farther_than_marks_and_spreads_both_ways(self):
+        # 시설 좌표(건물 중심)는 도로에서 40m 떨어져도 붙고, 표지·노면표시는 20m까지만 붙음
+        facility = build_child_zone(self.roads, [((100, 40), "지정 시설 어린이집 (어린이집)")], [])
+        self.assertTrue(covered(facility, 100, 0) and covered(facility, 240, 0) and covered(facility, -40, 0))
+        self.assertFalse(covered(facility, 300, 0))
+        self.assertTrue(covered(facility, 0, 40) and not covered(facility, 0, 60))   # 다른 도로로도 남은 거리(50m)만큼 퍼짐
+        self.assertIsNone(build_child_zone(self.roads, [((100, 40), "노면 '어린이'")], []))
+        self.assertIsNone(build_child_zone(self.roads, [((100, 80), "지정 시설 어린이집 (어린이집)")], []))
+
     def test_evidence_classification(self):
         marks = [point(0, 0, CTT="어린이"), point(50, 0, CTT="보호구역"), point(52, 3, CTT="노인"), point(90, 0, CTT="30")]
         signs = [point(10, 0, MRK_NUM="324", RMK=""), point(20, 0, MRK_NUM="751", RMK="어린이보호구역 해제"),

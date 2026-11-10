@@ -1,8 +1,9 @@
-"""강남역 지도 입력 수집: OSM, VWorld, 저장소의 시설 레이어 스냅샷."""
+"""강남역 지도 입력 수집: OSM, VWorld, 서울 T-GIS, 공공데이터포털, 저장소의 시설 레이어 스냅샷."""
 
 import argparse
 import hashlib
 import json
+import math
 import re
 import time
 import urllib.error
@@ -17,6 +18,7 @@ from .geo import CX, CY
 VWORLD_DATA = "https://api.vworld.kr/req/data"
 VWORLD_WFS = "https://api.vworld.kr/req/wfs"
 OVERPASS = "https://overpass-api.de/api/interpreter"
+CHILD_ZONE_API = "https://api.data.go.kr/openapi/tn_pubr_public_child_prtc_zn_api"   # 공공데이터포털 15012891
 SEOUL_DATASET = "https://data.seoul.go.kr/dataList/{}/S/1/datasetView.do"
 SEOUL_FILE = "https://datafile.seoul.go.kr/bigfile/iot/inf/nio_download.do?&useCache=false"
 # 서울시 교통안전시설물(T-GIS) 원본: (데이터셋, 압축 파일 이름 접두어, 필요한 shp 이름)
@@ -74,36 +76,80 @@ def unique_features(features):
     return result
 
 
-def fetch_parcels(key, bbox):
-    """2D 데이터 API를 페이지 끝까지 조회한 후 지목 '도' 필지만 선택."""
+def fetch_vworld_data(key, layer, bbox, label):
+    """2D 데이터 API를 페이지 끝까지 조회합니다. (피처 목록, 페이지 수)."""
     features, total, page = [], None, 1
     while total is None or len(features) < total:
         response = request_json(VWORLD_DATA, {
             "service": "data", "request": "GetFeature", "version": "2.0",
-            "data": "LP_PA_CBND_BUBUN", "key": key, "format": "json",
+            "data": layer, "key": key, "format": "json",
             "size": 1000, "page": page, "geometry": "true", "attribute": "true",
             "crs": "EPSG:4326", "geomFilter": "BOX(" + ",".join(map(str, bbox)) + ")",
         }).get("response", {})
         if response.get("status") != "OK":
             code = response.get("error", {}).get("code", response.get("status", "unknown"))
             # API 오류 본문은 요청 URL/키를 포함할 수 있어 코드만 사용합니다.
-            raise DownloadError(f"VWorld 지적도: API 오류 ({str(code).replace(key, '[REDACTED]')})")
+            raise DownloadError(f"VWorld {label}: API 오류 ({str(code).replace(key, '[REDACTED]')})")
         records = response.get("record", {})
         total = int(records["total"])
         current = response.get("result", {}).get("featureCollection", {}).get("features", [])
         if not current:
-            raise DownloadError("VWorld 지적도: 페이지가 비어 전체 수집을 완료하지 못했습니다.")
+            raise DownloadError(f"VWorld {label}: 페이지가 비어 전체 수집을 완료하지 못했습니다.")
         before = len(features)
         features = unique_features(features + current)
         if len(features) == before:
-            raise DownloadError("VWorld 지적도: 중복 페이지만 반환되어 수집을 중단했습니다.")
+            raise DownloadError(f"VWorld {label}: 중복 페이지만 반환되어 수집을 중단했습니다.")
         page += 1
+    return features, page - 1
+
+
+def fetch_parcels(key, bbox):
+    """연속지적도에서 지목 '도' 필지만 선택."""
+    features, pages = fetch_vworld_data(key, "LP_PA_CBND_BUBUN", bbox, "지적도")
     roads = [f for f in features if str(f.get("properties", {}).get("jibun", "")).strip().endswith("도")]
     if not roads:
         raise DownloadError("VWorld 지적도: 도로 필지를 찾지 못했습니다.")
     result = collection(roads)
-    result["pudo_source"] = {"all_parcels": len(features), "road_parcels": len(roads), "pages": page - 1}
+    result["pudo_source"] = {"all_parcels": len(features), "road_parcels": len(roads), "pages": pages}
     return result
+
+
+def fetch_upis_roads(key, bbox):
+    """도시계획시설(도로) 면. 규모별 등급(광로·대로·중로·소로 1~3류)을 폭 근거로 씁니다."""
+    features, _ = fetch_vworld_data(key, "LT_C_UPISUQ151", bbox, "도시계획시설 도로")
+    return collection(features)
+
+
+def fetch_child_zones(key, radius_m=2000):
+    """전국어린이보호구역표준데이터 API 전체를 받아 판정 영역 주변의 지정 시설만 남깁니다.
+
+    API의 지역 필터가 동작하지 않아(기관명 NODATA, 시군구 SQL 오류) 전체를 페이지 단위로 받습니다.
+    """
+    items, page, total = [], 1, None
+    while total is None or len(items) < total:
+        response = request_json(CHILD_ZONE_API, {"serviceKey": key, "pageNo": page, "numOfRows": 1000, "type": "json"})
+        header = response.get("response", response).get("header", {})
+        if header.get("resultCode") != "00":
+            raise DownloadError(f"어린이보호구역 API: 오류 ({header.get('resultCode', 'unknown')})")
+        body = response.get("response", response).get("body") or {}
+        current = (body.get("items") or {}).get("item") or []
+        total = int(body.get("totalCount", 0))
+        if not current:
+            raise DownloadError("어린이보호구역 API: 페이지가 비어 전체 수집을 완료하지 못했습니다.")
+        items += current
+        page += 1
+    nearby = []
+    for item in items:
+        try:
+            lon, lat = float(item["longitude"]), float(item["latitude"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if math.hypot((lon - CENTER_LON) * CX, (lat - CENTER_LAT) * CY) <= radius_m:
+            nearby.append(item)
+    if not nearby:
+        raise DownloadError("어린이보호구역 API: 판정 영역 주변 시설이 없습니다.")
+    return {"source": CHILD_ZONE_API, "filter": f"판정 중심 반경 {radius_m}m", "total": len(items),
+            "count": len(nearby), "items": nearby}
 
 
 def fetch_hdmap(key, layer, bbox, depth=0):
@@ -270,10 +316,16 @@ def main(argv=None):
         ("vworld_road_parcels_gangnam.geojson", "download", VWORLD_DATA, lambda: fetch_parcels(key, bbox)),
         ("hdmap/lt_l_a2link.geojson", "download", VWORLD_WFS, lambda: fetch_hdmap(key, "lt_l_a2link", bbox)),
         ("hdmap/lt_l_b2surfacelinemark.geojson", "download", VWORLD_WFS, lambda: fetch_hdmap(key, "lt_l_b2surfacelinemark", bbox)),
+        ("vworld_upis_roads_gangnam.geojson", "download", VWORLD_DATA, lambda: fetch_upis_roads(key, bbox)),
     ] + [
         (filename, "download", SEOUL_DATASET.format(dataset), lambda d=dataset, p=prefix, m=member: fetch_tgis(d, p, m, bbox))
         for filename, (dataset, prefix, member) in TGIS_LAYERS.items()
     ]
+    zone_key = api_key("datagokr")
+    if zone_key:
+        tasks.append(("child_protection_zones.json", "download", CHILD_ZONE_API, lambda: fetch_child_zones(zone_key)))
+    else:
+        print("건너뜀: child_protection_zones.json (env의 data_go_kr_api 없음, 보호구역 지정 시설 없이 판정)", flush=True)
     manifest_path = args.out / "download_manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.is_file() else {"files": {}}
     manifest.update({"center": [CENTER_LON, CENTER_LAT], "bbox": bbox, "crs": "EPSG:4326", "complete": False})
@@ -291,7 +343,7 @@ def main(argv=None):
             if filename == "layers_gangnam.json":
                 counts = {name: len(fc["features"]) for name, fc in data.items()}
             else:
-                counts = len(data.get("features", data.get("elements", [])))
+                counts = len(data.get("features", data.get("elements", data.get("items", []))))
             manifest["files"][filename] = {
                 "method": method, "source": source,
                 "saved_at": datetime.now(timezone.utc).isoformat(), "count": counts,
@@ -300,7 +352,11 @@ def main(argv=None):
             print(f"저장: {filename} ({counts})", flush=True)
         except (DownloadError, OSError, ValueError, KeyError) as error:
             # I/O 오류도 파일 내용이나 자격 증명을 출력하지 않도록 정리합니다.
-            message = str(error).replace(key, "[REDACTED]") if isinstance(error, DownloadError) else type(error).__name__
+            message = type(error).__name__
+            if isinstance(error, DownloadError):
+                message = str(error).replace(key, "[REDACTED]")
+                if zone_key:
+                    message = message.replace(zone_key, "[REDACTED]")
             errors.append(f"{filename}: {message}")
             print(f"실패: {filename}: {message}", flush=True)
         save_json(manifest_path, manifest)

@@ -27,8 +27,14 @@ pudo_v0.geojson / pudo_v0_data.js / pudo_v0_standalone.html
 | `tgis/A064_P_signs.geojson` | 점 GeoJSON, T-GIS 안전표지 원본 속성(`MRK_NUM`, `RMK` 등) | 어린이보호구역 근거·경계 |
 | `tgis/A054_P_text_marks.geojson` | 점 GeoJSON, T-GIS 노면 문자표시 원본 속성(`CTT` 등) | 어린이보호구역 근거 |
 | `vworld_road_parcels_gangnam.geojson` | 도로 필지 MultiPolygon GeoJSON | 도로 폭 추정 |
+| `vworld_upis_roads_gangnam.geojson` | 도시계획시설 도로 면, `properties.grad_se`(광로·대로·중로·소로), `road_ty`(1~3류) | P1 폭 근거 (선택) |
+| `child_protection_zones.json` | `{items: [...]}`, 전국어린이보호구역표준데이터 API 행(`trgetFcltyNm`, `fcltyKnd`, `latitude`, `longitude`) | 보호구역 지정 시설 (선택) |
 
 외부 입력마다 구조가 다르며, 로더가 판정에 필요한 좌표와 속성으로 변환합니다. 외부 GeoJSON 좌표는 `[경도, 위도]`의 WGS84이며, `MapData`의 점·선은 강남역 기준 근사 미터 좌표입니다. 웹 지도 중심 `PUDO_META.center`만 Leaflet 형식인 `[위도, 경도]`입니다.
+
+H6 어린이보호구역은 세 단계 근거를 씁니다. T-GIS 표지·노면 문자로 복원한 구간 안이면 보호구역 안(기본 모드 불가, 완화 모드 확인 필요)입니다. 지정 시설 목록(`child_protection_zones.json`, 없으면 `child_protection_zones.csv`)이 있으면 시설 좌표를 70m 안의 가장 가까운 도로에 붙여 150m까지 퍼진 도로를 따로 만들고, 그 안의 후보는 두 모드 모두 확인 필요로 둡니다. 정문 위치와 지정 범위를 몰라 간선도로까지 번질 수 있기 때문입니다. T-GIS 파일이 없으면 대상시설 반경 300m 규칙으로 돌아갑니다.
+
+P1 통과 폭(편도 1차로 양방향 도로)은 지적도 도로 필지 폭과 도시계획시설 도로 등급의 법정 최소 폭(「도시·군계획시설의 결정·구조 및 설치기준에 관한 규칙」 제9조)을 함께 봅니다. 등급은 도로 중심점과 진행 방향 앞뒤 10m가 모두 같은 면 안에 있을 때만 그 도로의 것으로 봅니다. 지적도 폭이 없으면 등급 하한으로 채우고, 지적도 폭은 기준 미달인데 등급 하한은 기준 이상이면 불가 대신 자료 불일치(확인 필요)로 둡니다. 소로 3류(8m 미만)는 하한이 없어 폭 근거로 쓰지 않습니다. 판정 출력의 `map.planned_road`에 등급명을 남깁니다.
 
 H1은 교차로 면까지의 거리로 판정합니다(면 안이면 제32조 1호 불가, 가장자리 5m 이내면 2호 불가). 교차로 면은 각 way를 차도 반폭(후보 생성 때의 가장자리 이동 거리 + 1.5m 중앙값)만큼 넓힌 뒤 같은 이름의 도로를 하나로 합치고(상하행 사이 20m까지 메움), 교차 노드 40m 안에서 서로 다른 도로가 겹치는 부분입니다. 교차 노드는 OSM 차도에서 두 개 이상의 서로 다른 way가 공유하는 노드입니다. 닫힌 way의 시작·끝 노드와, 두 way의 끝이 `CONTINUATION_TURN_DEG`(20°) 미만으로 꺾이며 이어지는 분할 지점은 제외합니다. 다른 길과 직각에 가깝게 이어지는 끝점은 도로 모퉁이로 보고 유지합니다.
 

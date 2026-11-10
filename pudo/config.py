@@ -14,6 +14,7 @@ API_KEY_NAMES = {
     "google": ("GOOGLE_MAPS_KEY", "google_api"),
     "mapillary": ("MLY_TOKEN", "mapillary_api"),
     "vworld": ("VWORLD_API_KEY", "vworld_api"),
+    "datagokr": ("DATA_GO_KR_API_KEY", "data_go_kr_api"),   # 공공데이터포털 일반 인증키(Decoding)
 }
 
 

@@ -5,7 +5,7 @@ from pudo.config import CENTER_LAT, CENTER_LON, TH
 from pudo.datasets import MapData
 from pudo.geo import distance_to_points, distance_to_segment, distance_to_segments
 from pudo.rules import evaluate_candidates, judge
-from shapely.geometry import box
+from shapely.geometry import LineString, box
 
 
 def candidate():
@@ -117,6 +117,47 @@ class RuleTests(unittest.TestCase):
         self.assertEqual(result["verdict_lenient"], lenient["verdict"])
         self.assertEqual(result["fail_reasons_lenient"], lenient["fail_reasons"])
         self.assertEqual(result["check_reasons_lenient"], lenient["check_reasons"])
+
+
+class DesignatedFacilityAndWidthTests(unittest.TestCase):
+    def test_tgis_zone_fails_but_facility_only_zone_needs_check_in_both_modes(self):
+        feature = candidate()
+        data = clear_map(); data.child_zone = LineString([(-50, 0), (50, 0)])
+        data.child_zone_evidence = [((10, 0), "노면 '어린이'")]
+        self.assertEqual(judge(feature, data)["properties"]["verdict"], "불가")
+        data = clear_map(); data.child_zone_facility = LineString([(-50, 0), (50, 0)])
+        data.child_zone_evidence = [((0, 40), "지정 시설 어린이집 (어린이집)")]
+        for mode in ("strict", "lenient"):
+            result = judge(feature, data, mode=mode)["properties"]
+            self.assertEqual(result["verdict"], "확인 필요")
+            self.assertTrue(any(r.startswith("H6 어린이보호구역 지정 시설 (지정 시설 어린이집") for r in result["check_reasons"]))
+            check = next(c for c in result["checks"] if c["item"] == "H6 어린이보호구역")
+            self.assertIsNone(check["pass"])
+
+    def one_lane(self, width):
+        feature = candidate()
+        feature["properties"].update(lanes=1, road_type="residential", road_width_m=width)
+        return feature
+
+    def test_planned_grade_fills_missing_width_and_flags_contradiction(self):
+        # candidate()는 heading 90(연석이 동쪽) → 도로는 남북 방향
+        data = clear_map(); data.planned_roads = [(box(-10, -100, 10, 100), "중로3류", 12)]
+        missing = judge(self.one_lane(None), data)["properties"]
+        p1 = next(c for c in missing["checks"] if c["item"] == "P1 통과 폭")
+        self.assertTrue(p1["pass"]); self.assertIn("중로3류", p1["value"])
+        self.assertEqual(missing["map"]["planned_road"], "중로3류")
+        narrow = judge(self.one_lane(4.0), data)["properties"]
+        self.assertEqual(narrow["fail_reasons"], [])
+        self.assertTrue(any(r.startswith("P1 폭 자료 불일치") for r in narrow["check_reasons"]))
+        data.planned_roads = [(box(-10, -100, 10, 100), "소로3류", 0)]   # 8m 미만: 하한 없음
+        self.assertTrue(any(r.startswith("P1 통과 폭 부족") for r in judge(self.one_lane(4.0), data)["properties"]["fail_reasons"]))
+
+    def test_planned_grade_ignored_when_road_only_crosses_the_area(self):
+        # 교차로에서 가로지르는 대로 면에 중심점만 걸린 경우 (앞뒤 10m가 면 밖)
+        data = clear_map(); data.planned_roads = [(box(-100, -5, 100, 5), "광로2류", 50)]
+        result = judge(self.one_lane(None), data)["properties"]
+        self.assertIsNone(result["map"]["planned_road"])
+        self.assertIn("P1 도로 폭 없음 (단지 내 통로일 수 있음)", result["check_reasons"])
 
 
 class DistanceTests(unittest.TestCase):

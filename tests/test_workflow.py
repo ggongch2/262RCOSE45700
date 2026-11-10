@@ -174,6 +174,32 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(loaded.hd_reg, [])
             self.assertEqual(loaded.images, {})
 
+    def test_loader_uses_designated_facilities_and_planned_road_grades(self):
+        from shapely.geometry import Point
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data, _ = write_fixture(root)
+            (data / "tgis").mkdir()
+            for name in ("A064_P_signs.geojson", "A054_P_text_marks.geojson"):
+                (data / "tgis" / name).write_text(json.dumps(collection()))
+            lon, lat = to_lonlat(-60, 40)
+            far_lon, far_lat = to_lonlat(5000, 0)
+            (data / "child_protection_zones.json").write_text(json.dumps({"items": [
+                {"trgetFcltyNm": "테스트어린이집", "fcltyKnd": "어린이집", "longitude": str(lon), "latitude": str(lat)},
+                {"trgetFcltyNm": "먼유치원", "fcltyKnd": "유치원", "longitude": str(far_lon), "latitude": str(far_lat)},
+            ]}, ensure_ascii=False))
+            ring = [to_lonlat(x, y) for x, y in [(-5, -120), (5, -120), (5, 120), (-5, 120), (-5, -120)]]
+            (data / "vworld_upis_roads_gangnam.geojson").write_text(json.dumps(collection(
+                feature("Polygon", [ring], grad_se="소로", road_ty="2", dgm_nm="소로2류"),
+                feature("Polygon", [ring], grad_se="", road_ty="", dgm_nm="기타도로시설"),
+            ), ensure_ascii=False))
+            loaded = load_map_data(data, root / "sv_out")
+            self.assertEqual([name for _, name in loaded.schools], ["테스트어린이집 (어린이집)"])
+            self.assertIsNone(loaded.child_zone)                       # 표지·노면표시 근거 없음
+            self.assertLess(loaded.child_zone_facility.distance(Point(-60, 0)), 1)
+            self.assertEqual([(grade, width) for _, grade, width in loaded.planned_roads], [("소로2류", 8)])
+            self.assertTrue(loaded.planned_roads[0][0].contains(Point(0, 50)))
+
     def test_export_without_html_template(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

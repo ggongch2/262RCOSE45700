@@ -7,6 +7,10 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import numpy as np
+import shapely
+from shapely.geometry import shape
+
 from .config import CONTINUATION_TURN_DEG, require_files
 from .geo import to_meters
 from .vision import load_assessments, PhotoContractError
@@ -19,12 +23,14 @@ class MapData:
 
     intersections: list = field(default_factory=list)   # 교차 노드 (참고용)
     intersection_area: object = None                     # 교차로 면 (shapely, 미터 좌표). H1 판정에 사용
-    child_zone: object = None                            # 어린이보호구역 추정 구간 (shapely 선). 없으면 시설 반경 규칙
+    child_zone: object = None                            # 어린이보호구역 추정 구간 (shapely 선, T-GIS 표지·노면표시 근거). 없으면 시설 반경 규칙
+    child_zone_facility: object = None                   # 지정 시설 위치만으로 추정한 주변 도로 (표지 근거 없음, 확인 필요용)
     child_zone_evidence: list = field(default_factory=list)   # [(좌표, 설명)] 구간 근거 표지·노면표시
     crosswalks: list = field(default_factory=list)
     hydrants: list = field(default_factory=list)
     buses: list = field(default_factory=list)
-    schools: list = field(default_factory=list)
+    schools: list = field(default_factory=list)          # [(좌표, 이름)] 보호구역 대상시설. 지정 목록이 있으면 실제 지정 시설
+    planned_roads: list = field(default_factory=list)    # [(면, 등급명, 최소 폭 m)] 도시계획시설 도로 (규모별 등급)
     lines: dict = field(default_factory=dict)
     hd_reg: list = field(default_factory=list)
     hd_park: list = field(default_factory=list)
@@ -158,41 +164,82 @@ def _intersection_area(elements, half_widths):
     return unary_union(pieces) if pieces else None
 
 
-ZONE_STANDARD_FILE = "child_protection_zones.csv"   # 전국어린이보호구역표준데이터 (공공데이터포털 15012891)
+ZONE_API_FILE = "child_protection_zones.json"       # 전국어린이보호구역표준데이터 API (pudo download)
+ZONE_STANDARD_FILE = "child_protection_zones.csv"   # 같은 표준데이터의 파일 다운로드 (공공데이터포털 15012891)
 NOT_ZONE_TARGET = ("중학교", "고등학교")             # 도로교통법 제12조 지정 대상이 아님
+FACILITY_RADIUS_M = 1500                            # 판정 영역 500m + 지정 범위 상한 여유
 
 
-def _protection_facilities(data_dir, layers):
-    """어린이보호구역 대상시설 [(미터 좌표, 이름)].
-
-    data/에 표준데이터 CSV가 있으면 실제 지정 시설(유치원·어린이집·학원 포함)을 쓰고,
-    없으면 스냅샷의 학교 좌표에서 지정 대상이 아닌 중·고등학교를 뺍니다.
-    """
-    path = Path(data_dir) / ZONE_STANDARD_FILE
-    if path.is_file():
+def _read_zone_rows(data_dir):
+    """지정 보호구역 시설 행 [(경도, 위도, 이름, 종류)]. 지정 목록이 없으면 None."""
+    api_path, csv_path = Path(data_dir) / ZONE_API_FILE, Path(data_dir) / ZONE_STANDARD_FILE
+    if api_path.is_file():
+        items = read_json(api_path)["items"]
+        return [(item.get("longitude"), item.get("latitude"), item.get("trgetFcltyNm", ""), item.get("fcltyKnd", ""))
+                for item in items]
+    if csv_path.is_file():
         for encoding in ("utf-8-sig", "cp949"):
             try:
-                with path.open(encoding=encoding, newline="") as stream:
+                with csv_path.open(encoding=encoding, newline="") as stream:
                     rows = list(csv.DictReader(stream))
                 break
             except UnicodeDecodeError:
                 continue
         else:
-            raise ValueError(f"{path.name}: UTF-8 또는 CP949가 아닙니다.")
+            raise ValueError(f"{csv_path.name}: UTF-8 또는 CP949가 아닙니다.")
+        return [(row.get("경도"), row.get("위도"), row.get("대상시설명", ""), row.get("시설종류", "")) for row in rows]
+    return None
+
+
+def _protection_facilities(data_dir, layers):
+    """(어린이보호구역 대상시설 [(미터 좌표, 이름)], 지정 목록 여부).
+
+    지정 목록(표준데이터 API 또는 CSV)이 있으면 실제 지정된 시설(유치원·어린이집·학원 포함)을 쓰고,
+    없으면 스냅샷의 학교 좌표에서 지정 대상이 아닌 중·고등학교를 뺍니다.
+    """
+    rows = _read_zone_rows(data_dir)
+    if rows is not None:
         facilities = []
-        for row in rows:
+        for lon, lat, name, kind in rows:
             try:
-                position = to_meters(float(row["경도"]), float(row["위도"]))
-            except (KeyError, TypeError, ValueError):
+                position = to_meters(float(lon), float(lat))
+            except (TypeError, ValueError):
                 continue
-            if math.hypot(*position) <= 1500:   # 판정 영역 500m + 지정 범위 상한 여유
-                facilities.append((position, f"{row.get('대상시설명', '').strip()} ({row.get('시설종류', '').strip()})"))
-        return facilities
+            if math.hypot(*position) <= FACILITY_RADIUS_M:
+                facilities.append((position, f"{str(name).strip()} ({str(kind).strip()})"))
+        return facilities, True
     return [
         (to_meters(*feature["geometry"]["coordinates"]), feature["properties"]["이름"])
         for feature in layers["C 학교(보호구역 300m 버퍼)"]["features"]
         if not feature["properties"]["이름"].endswith(NOT_ZONE_TARGET)
-    ]
+    ], False
+
+
+PLANNED_ROAD_FILE = "vworld_upis_roads_gangnam.geojson"
+# 도시·군계획시설의 결정·구조 및 설치기준에 관한 규칙 제9조 규모별 구분: 등급별 최소 폭(m).
+# 소로 3류는 '폭 8m 미만'이라 하한이 없습니다.
+PLANNED_MIN_WIDTH = {
+    ("광로", "1"): 70, ("광로", "2"): 50, ("광로", "3"): 40,
+    ("대로", "1"): 35, ("대로", "2"): 30, ("대로", "3"): 25,
+    ("중로", "1"): 20, ("중로", "2"): 15, ("중로", "3"): 12,
+    ("소로", "1"): 10, ("소로", "2"): 8, ("소로", "3"): 0,
+}
+
+
+def _planned_roads(path):
+    """[(미터 좌표 면, 등급명, 최소 폭)]. 등급이 없는 '기타도로시설' 면은 폭 근거가 없어 뺍니다."""
+    if not path.is_file():
+        return []
+    roads = []
+    for feature in read_json(path)["features"]:
+        properties, geometry = feature.get("properties", {}), feature.get("geometry")
+        grade = (str(properties.get("grad_se") or "").strip(), str(properties.get("road_ty") or "").strip())
+        if grade not in PLANNED_MIN_WIDTH or not geometry:
+            continue
+        area = shape(geometry)
+        area = shapely.transform(area, lambda xy: np.column_stack(to_meters(xy[:, 0], xy[:, 1])))
+        roads.append((area.buffer(0), f"{grade[0]}{grade[1]}류", PLANNED_MIN_WIDTH[grade]))
+    return roads
 
 
 def _images(path):
@@ -226,13 +273,19 @@ def load_map_data(data_dir, sv_dir):
         surface, links = [], []
 
     roads = read_json(data_dir / "osm_roads_gangnam.json")["elements"]
-    facilities = _protection_facilities(data_dir, layers)
-    child_zone, evidence = None, []
+    facilities, designated = _protection_facilities(data_dir, layers)
+    child_zone, child_zone_facility, evidence = None, None, []
     signs_path, marks_path = data_dir / "tgis" / "A064_P_signs.geojson", data_dir / "tgis" / "A054_P_text_marks.geojson"
     if signs_path.is_file() and marks_path.is_file():
-        # 학교 좌표(블록 중심)는 도로와 멀어 구간 근거로 쓰지 않습니다. 학교 주변은 표지·노면표시가 덮습니다.
+        # 구간은 현장 표지·노면표시로 복원합니다. 지정 목록의 시설은 보호구역이 있다는 근거지만 정문 위치와
+        # 지정 범위를 몰라, 시설 주변 도로는 따로 만들어 '확인 필요'로만 씁니다 (간선도로로 번지는 과대 추정 방지).
+        # 지정 목록이 없을 때의 스냅샷 학교 좌표(블록 중심, 지정 여부 모름)는 쓰지 않습니다.
         evidence, boundaries = zone_evidence(read_json(signs_path)["features"], read_json(marks_path)["features"], [])
         child_zone = build_child_zone(roads, evidence, boundaries)
+        if designated:
+            facility_seeds, _ = zone_evidence([], [], facilities)
+            child_zone_facility = build_child_zone(roads, facility_seeds, boundaries)
+            evidence = evidence + facility_seeds
     return MapData(
         intersections=_intersections(roads),
         intersection_area=_intersection_area(roads, _half_widths(data_dir / "candidates_v1.geojson")),
@@ -240,10 +293,12 @@ def load_map_data(data_dir, sv_dir):
         hydrants=points("C 소화전"),
         buses=points("C 버스정류소"),
         schools=facilities,
+        planned_roads=_planned_roads(data_dir / PLANNED_ROAD_FILE),
         child_zone=child_zone,
+        child_zone_facility=child_zone_facility,
         child_zone_evidence=evidence,
         lines=dict(lines),
-        hd_reg=_hd_lines(surface, lambda p: (p.get("kind") == "515" and p.get("type") in ("111", "121")) or p.get("kind") == "516"),
+        hd_reg=_hd_lines(surface, lambda p: p.get("kind") == "515" and p.get("type") in ("111", "121")),
         hd_park=_hd_lines(surface, lambda p: p.get("kind") == "515" and p.get("type") == "112"),
         hd_bus=_hd_lines(surface, lambda p: p.get("kind") == "504"),
         hd_safe=_hd_lines(surface, lambda p: p.get("kind") == "531"),

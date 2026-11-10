@@ -2,7 +2,7 @@
 
 공개된 보호구역 경계 자료가 없어, 현장에 설치된 시설물로 구간을 추정합니다.
   - 구간 안 근거(씨앗): 노면 문자 "어린이"·"보호구역"·"학교앞", 어린이보호 표지(324, 133),
-    "어린이보호구역" 문구가 있는 표지, 초등학교 등 지정 대상시설과 가장 가까운 도로
+    "어린이보호구역" 문구가 있는 표지, 보호구역으로 지정된 시설(표준데이터)과 가장 가까운 도로
   - 구간 끝(경계): "어린이보호구역 해제", "여기부터" 보조표지
 씨앗에서 같은 도로를 따라 퍼져 나가되 경계 표지에서 멈추고, 지정 범위 상한(시설 주출입문 300m,
 「어린이·노인 및 장애인 보호구역의 지정 및 관리에 관한 규칙」 제3조)을 넘지 않습니다.
@@ -23,6 +23,7 @@ ZONE_REACH_M = 300      # 같은 도로의 두 근거 사이를 구간으로 잇
 SEED_MARGIN_M = 50      # 표지·노면표시 하나가 앞뒤로 덮는 거리
 FACILITY_REACH_M = 150  # 대상시설과 가장 가까운 도로에서 모든 방향으로 퍼지는 거리 (주출입문 위치 모름)
 SNAP_M = 20          # 표지·노면표시를 도로에 붙이는 최대 거리
+FACILITY_SNAP_M = 70  # 시설 좌표(건물·부지 중심)를 도로에 붙이는 최대 거리. 강남역 주변 지정 시설은 도로에서 15~65m
 SEED_MARKS = ("어린이", "보호구역", "보호구역30", "학교앞")
 BOUNDARY = re.compile(r"해제|여기부터|여기서부터")
 NOT_BOUNDARY = re.compile(r"50|주정차|\d+m")
@@ -55,16 +56,17 @@ def zone_evidence(signs, marks, facilities):
         elif number in ("324", "133") or "어린이" in remark or "학교앞" in remark:
             label = {"324": "어린이보호 표지", "133": "어린이보호 주의표지"}.get(number, f"표지 '{remark}'")
             seeds.append((_point(feature), label))
-    seeds += [(position, f"대상시설 {name}") for position, name in facilities]
+    seeds += [(position, f"지정 시설 {name}") for position, name in facilities]
     return seeds, boundaries
 
 
-def build_child_zone(road_elements, seeds, boundaries, *, reach=ZONE_REACH_M, facility_reach=FACILITY_REACH_M, snap=SNAP_M):
+def build_child_zone(road_elements, seeds, boundaries, *, reach=ZONE_REACH_M, facility_reach=FACILITY_REACH_M, snap=SNAP_M,
+                     facility_snap=FACILITY_SNAP_M):
     """씨앗에서 도로를 따라 퍼진 구간(선)을 돌려줍니다. 씨앗이 없으면 None.
 
     표지·노면표시는 도로마다 설치되므로 같은 이름의 도로를 따라서만 퍼집니다. 근거 하나는 앞뒤 50m를,
     같은 도로의 두 근거가 reach 안에 있으면 그 사이 전체를 덮습니다.
-    대상시설 씨앗만 주변 도로 어느 방향으로든 facility_reach까지 퍼집니다.
+    지정 시설 씨앗만 facility_snap 안의 가장 가까운 도로에 붙어, 주변 도로 어느 방향으로든 facility_reach까지 퍼집니다.
     """
     edges = []   # (선, 시작 노드, 끝 노드, 도로 이름)
     for way in road_elements:
@@ -80,11 +82,11 @@ def build_child_zone(road_elements, seeds, boundaries, *, reach=ZONE_REACH_M, fa
     tree = STRtree([edge[0] for edge in edges])
     events = defaultdict(list)   # 선 번호 → [(위치, 종류, 키)]
 
-    def attach(position, kind, key):
+    def attach(position, kind, key, limit=snap):
         point = Point(position)
         index = int(tree.nearest(point))
         line = edges[index][0]
-        if line.distance(point) <= snap:
+        if line.distance(point) <= limit:
             events[index].append((line.project(point), kind, key))
             return index
         return None
@@ -93,9 +95,10 @@ def build_child_zone(road_elements, seeds, boundaries, *, reach=ZONE_REACH_M, fa
         attach(position, "boundary", number)
     groups = defaultdict(list)   # 퍼지는 규칙 → 시작 노드
     for number, (position, label) in enumerate(seeds):
-        index = attach(position, "seed", number)
+        facility = label.startswith("지정 시설")
+        index = attach(position, "seed", number, facility_snap if facility else snap)
         if index is not None:
-            groups["*" if label.startswith("대상시설") else edges[index][3]].append(("seed", number))
+            groups["*" if facility else edges[index][3]].append(("seed", number))
     if not groups:
         return None
 

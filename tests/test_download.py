@@ -52,6 +52,33 @@ class DownloadTests(unittest.TestCase):
             with self.assertRaisesRegex(download.DownloadError, "누락"):
                 download.fetch_hdmap("test-key", "lt_l_a2link", [127, 37, 128, 38])
 
+    def test_upis_roads_use_paged_data_api(self):
+        responses = [parcel_page(2, point("a")), parcel_page(2, point("b"))]
+        with patch.object(download, "request_json", side_effect=responses) as fetch:
+            result = download.fetch_upis_roads("test-key", [127, 37, 128, 38])
+        self.assertEqual([f["id"] for f in result["features"]], ["a", "b"])
+        self.assertEqual(fetch.call_args_list[0].args[1]["data"], "LT_C_UPISUQ151")
+
+    def test_child_zones_collect_all_pages_and_keep_nearby(self):
+        def item(name, dx):
+            return {"trgetFcltyNm": name, "longitude": str(download.CENTER_LON + dx / download.CX),
+                    "latitude": str(download.CENTER_LAT)}
+        def page(total, *items):
+            return {"header": {"resultCode": "00"}, "body": {"items": {"item": list(items)}, "totalCount": total}}
+        responses = [page(3, item("가까움", 100), item("멂", 9000)), page(3, item("경계", 1999))]
+        with patch.object(download, "request_json", side_effect=responses) as fetch:
+            result = download.fetch_child_zones("test-key")
+        self.assertEqual([i["trgetFcltyNm"] for i in result["items"]], ["가까움", "경계"])
+        self.assertEqual((result["total"], result["count"]), (3, 2))
+        self.assertEqual([call.args[1]["pageNo"] for call in fetch.call_args_list], [1, 2])
+
+    def test_child_zones_api_error_is_reported_without_key(self):
+        response = {"header": {"resultCode": "30", "resultMsg": "SERVICE_KEY_IS_NOT_REGISTERED test-key"}}
+        with patch.object(download, "request_json", return_value=response):
+            with self.assertRaises(download.DownloadError) as raised:
+                download.fetch_child_zones("test-key")
+        self.assertNotIn("test-key", str(raised.exception))
+
     def test_api_http_error_never_includes_secret_url(self):
         secret_url = "https://api.vworld.kr/req/data?key=test-secret"
         error = urllib.error.HTTPError(secret_url, 403, secret_url, {}, io.BytesIO(b"test-secret"))
