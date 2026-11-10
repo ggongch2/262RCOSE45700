@@ -52,6 +52,13 @@
   .rules button { font-size:12px; padding:1px 6px; }
   tr.off td { color:#aaa; } tr.off td.f, tr.off td.u, tr.off td.p { color:#aaa; font-weight:normal; }
   .pill.new { background:#fff; color:var(--ok); border:1px solid var(--ok); }
+  .thbox { flex-basis:100%; font-size:13px; }
+  .thbox summary { cursor:pointer; }
+  .thgrid { display:flex; flex-wrap:wrap; gap:4px 14px; margin:6px 0 2px; }
+  .thgrid label { display:flex; gap:4px; align-items:center; }
+  .thgrid input { width:64px; font:inherit; font-size:12.5px; padding:1px 4px; }
+  .thgrid input.changed { border:2px solid var(--accent); }
+  #busy { font-size:12px; color:var(--accent); }
   @media (max-width: 860px) {
     #app { grid-template-columns:1fr; grid-template-rows:auto 55vh auto; }
     #side { border-left:0; border-top:1px solid var(--line); }
@@ -67,7 +74,10 @@
     <label>사유 <select id="fReason"><option value="">전체</option></select></label>
     <span class="sum" id="sum"></span>
     <button id="btnExport">GeoJSON 내보내기</button>
+    <button id="btnHtml" hidden title="지금 조건(기준값·끈 규칙)의 결과를 서버 없이 열리는 HTML 파일로 저장">현재 조건 HTML 저장</button>
+    <span id="busy"></span>
     <div class="rules" id="rules" title="체크를 끄면 그 규칙을 빼고 다시 판정합니다. 끈 규칙 때문에 불가·확인 필요였던 곳이 풀립니다."></div>
+    <details class="thbox" id="thBox" hidden><summary>기준값 바꾸기 (m) · 바꾸면 서버가 다시 판정</summary><div class="thgrid" id="thInputs"></div></details>
   </header>
   <div id="map"></div>
   <div id="side">
@@ -88,9 +98,14 @@ const code = (reason) => String(reason).split(' ')[0];
 // 규칙 해제: 끈 규칙의 불가·확인 필요 사유를 빼고 같은 방식(불가 사유 → 불가, 확인 사유 → 확인 필요, 없으면 가능)으로 다시 판정합니다.
 let off = new Set();
 try { off = new Set(JSON.parse(localStorage.getItem('pudo_rules_off') || '[]')); } catch (e) {}
+// 저장된 결과 파일(현재 조건 HTML 저장)은 만든 조건을 그대로 보여 줍니다.
+if (PUDO_META.rules_off && PUDO_META.rules_off.length) off = new Set(PUDO_META.rules_off);
+// 서버 모드: http로 열고 /api/meta가 응답하면 기준값을 바꿔 서버에서 다시 판정합니다.
+let SERVER = false, DEFAULT_TH = {...(PUDO_META.thresholds || {})}, thresholds = {...DEFAULT_TH};
+const BASE = new Map(PUDO.features.map(f => [f.properties.id, f.properties.verdict]));   // 처음 불러온 판정 (비교 기준)
 const saveOff = () => { try { localStorage.setItem('pudo_rules_off', JSON.stringify([...off])); } catch (e) {} };
 const active = (reason) => !off.has(code(reason));
-const baseV = (p) => p.verdict;   // 모든 규칙을 적용한 원래 판정
+const baseV = (p) => BASE.get(p.id) ?? p.verdict;
 const FR = (p) => p.fail_reasons.filter(active);
 const CR = (p) => p.check_reasons.filter(active);
 const V = (p) => FR(p).length ? '불가' : CR(p).length ? '확인 필요' : '가능';
@@ -139,9 +154,50 @@ function drawRules() {
     + ` <button id="rulesAll">모두 적용</button>`;
   $('rules').querySelectorAll('input[data-rule]').forEach(box => box.onchange = () => {
     box.checked ? off.delete(box.dataset.rule) : off.add(box.dataset.rule);
-    saveOff(); drawRules(); draw(); if (selected) show(selected);
+    saveOff(); drawRules(); refresh();
   });
-  $('rulesAll').onclick = () => { off.clear(); saveOff(); drawRules(); draw(); if (selected) show(selected); };
+  $('rulesAll').onclick = () => { off.clear(); saveOff(); drawRules(); refresh(); };
+}
+
+// 조건이 바뀌면: 서버 모드는 서버에서 다시 판정, 파일로 열면 사유만 빼서 다시 표시합니다.
+async function refresh() {
+  if (SERVER) {
+    $('busy').textContent = '판정 중…';
+    try {
+      const res = await fetch('/api/evaluate', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({thresholds, rules_off:[...off]})});
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error || res.status);
+      PUDO.features = body.features; byId = new Map(PUDO.features.map(f => [f.properties.id, f]));
+      if (selected) selected = byId.get(selected.properties.id) || null;
+      $('busy').textContent = '';
+    } catch (e) { $('busy').textContent = `판정 실패: ${e.message}`; return; }
+  }
+  draw(); if (selected) show(selected);
+}
+
+function drawThresholds() {
+  $('thInputs').innerHTML = Object.entries(DEFAULT_TH).map(([k, v]) =>
+    `<label>${esc(k)} <input type="number" min="0" step="0.5" data-th="${esc(k)}" value="${esc(thresholds[k])}" class="${thresholds[k] !== v ? 'changed' : ''}"></label>`).join('')
+    + ` <button id="thReset">기본값으로</button>`;
+  $('thInputs').querySelectorAll('input[data-th]').forEach(input => input.onchange = () => {
+    const value = Number(input.value);
+    if (!Number.isFinite(value) || value < 0) { input.value = thresholds[input.dataset.th]; return; }
+    thresholds[input.dataset.th] = value; drawThresholds(); refresh();
+  });
+  $('thReset').onclick = () => { thresholds = {...DEFAULT_TH}; drawThresholds(); refresh(); };
+}
+
+async function connectServer() {
+  if (!location.protocol.startsWith('http')) return;
+  try {
+    const res = await fetch('/api/meta');
+    if (!res.ok) return;
+    const meta = await res.json();
+    SERVER = true; DEFAULT_TH = meta.thresholds; thresholds = {...DEFAULT_TH};
+    $('thBox').hidden = false; $('btnHtml').hidden = false;
+    drawThresholds();
+    if (off.size) refresh();
+  } catch (e) { /* 서버 없이 연 경우 */ }
 }
 drawRules();
 
@@ -211,7 +267,7 @@ function overview(fs) {
   $('overview').querySelectorAll('li[data-id]').forEach(li => li.onclick = () => focusId(li.dataset.id));
 }
 
-const byId = new Map(PUDO.features.map(f => [f.properties.id, f]));
+let byId = new Map(PUDO.features.map(f => [f.properties.id, f]));
 function focusId(id) {
   const f = byId.get(id); if (!f) return;
   const [lon, lat] = f.geometry.coordinates;
@@ -272,7 +328,13 @@ $('btnExport').onclick = () => {
     verdict_current:V(f.properties), rules_off:[...off]}}; })};
   const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([JSON.stringify(fc)], {type:'application/geo+json'})); a.download = 'pudo_v0_reviewed.geojson'; a.click();
 };
+$('btnHtml').onclick = async () => {
+  const res = await fetch('/api/export', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({thresholds, rules_off:[...off]})});
+  if (!res.ok) { $('busy').textContent = '저장 실패'; return; }
+  const a = document.createElement('a'); a.href = URL.createObjectURL(await res.blob()); a.download = 'pudo_result.html'; a.click();
+};
 draw();
+connectServer();
 </script>
 </body>
 </html>

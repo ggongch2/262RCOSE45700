@@ -10,6 +10,7 @@ COMMANDS = {
     "candidates": ("candidates", "도로망에서 승하차 후보 생성"),
     "prepare": ("measure", "준비: 후보별 측정값 생성 (판정 없음)"),
     "pipeline": ("pipeline", "기본 조건으로 판정 결과와 웹 데이터 생성 (측정값은 필요할 때만 다시 준비)"),
+    "serve": ("server", "담당자 화면 로컬 서버: 화면에서 기준값·규칙을 바꿔 바로 판정 (127.0.0.1 전용)"),
     "streetview": ("streetview", "Google 거리뷰 메타데이터 조회"),
     "mapillary": ("mapillary", "Mapillary 커버리지 조사"),
 }

@@ -46,33 +46,40 @@ def overlay_layers(map_data):
     return {name: {"type": "FeatureCollection", "features": features} for name, features in layers.items()}
 
 
+DATA_SCRIPT_TAG = '<script src="pudo_v0_data.js"></script>'
+
+
+def data_script(result, *, thresholds=None, layers=None, rules_off=()):
+    """화면이 읽는 데이터 스크립트: 판정 결과(PUDO), 메타(PUDO_META), 지도 근거 레이어(PUDO_LAYERS)."""
+    meta = {
+        "center": [CENTER_LAT, CENTER_LON], "radius_m": RADIUS_M,
+        "thresholds": TH if thresholds is None else thresholds, "rules_off": sorted(rules_off), "generated": "v0",
+    }
+    javascript = "const PUDO=" + json.dumps(result, ensure_ascii=False) + ";\n"
+    javascript += "const PUDO_META=" + json.dumps(meta, ensure_ascii=False) + ";\n"
+    javascript += "const PUDO_LAYERS=" + json.dumps(layers or {}, ensure_ascii=False) + ";\n"
+    return javascript
+
+
+def standalone_html(template_html, javascript):
+    """화면 HTML에 데이터를 넣어 서버 없이 열리는 단일 파일로 만듭니다."""
+    return template_html.replace(DATA_SCRIPT_TAG, "<script>\n" + javascript + "\n</script>", 1)
+
+
 def write_results(result, data_dir, web_dir, *, thresholds=None, layers=None):
     data_dir, web_dir = Path(data_dir), Path(web_dir)
     data_dir.mkdir(parents=True, exist_ok=True)
     web_dir.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(result, ensure_ascii=False)
     geojson_path = data_dir / "pudo_v0.geojson"
-    geojson_path.write_text(payload, encoding="utf-8")
-
-    meta = {
-        "center": [CENTER_LAT, CENTER_LON], "radius_m": RADIUS_M,
-        "thresholds": TH if thresholds is None else thresholds, "generated": "v0",
-    }
-    javascript = "const PUDO=" + payload + ";\n"
-    javascript += "const PUDO_META=" + json.dumps(meta, ensure_ascii=False) + ";\n"
-    javascript += "const PUDO_LAYERS=" + json.dumps(layers or {}, ensure_ascii=False) + ";\n"
+    geojson_path.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+    javascript = data_script(result, thresholds=thresholds, layers=layers)
     js_path = web_dir / "pudo_v0_data.js"
     js_path.write_text(javascript, encoding="utf-8")
     outputs = [geojson_path, js_path]
-
     template = web_dir / "index.html"
     if template.is_file():
-        html = template.read_text(encoding="utf-8")
         standalone = web_dir / "pudo_v0_standalone.html"
-        standalone.write_text(
-            html.replace('<script src="pudo_v0_data.js"></script>', "<script>\n" + javascript + "\n</script>", 1),
-            encoding="utf-8",
-        )
+        standalone.write_text(standalone_html(template.read_text(encoding="utf-8"), javascript), encoding="utf-8")
         outputs.append(standalone)
     return outputs
 
