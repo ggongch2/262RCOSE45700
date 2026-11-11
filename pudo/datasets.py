@@ -3,9 +3,12 @@
 import csv
 import json
 import math
+import re
+import zipfile
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
+from xml.etree import ElementTree
 
 import numpy as np
 import shapely
@@ -37,6 +40,7 @@ class MapData:
     hd_safe: list = field(default_factory=list)
     hd_link: list = field(default_factory=list)
     images: dict = field(default_factory=dict)
+    taxi_stands: list = field(default_factory=list)      # [(좌표, 설명)] 서울시 택시승차대. None이면 자료 없음
 
 
 def read_json(path):
@@ -213,6 +217,58 @@ def _protection_facilities(data_dir, layers):
     ], False
 
 
+TAXI_STAND_FILE = "taxi_stands.xlsx"   # 서울시 택시승차대 운영 목록 (2026년, 서울시 택시정책과 엑셀 원본)
+_XLSX = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+
+
+def read_xlsx_rows(path):
+    """엑셀 첫 시트의 행 목록 [{열 문자: 값}]. 별도 라이브러리 없이 표준 라이브러리로 읽습니다."""
+    with zipfile.ZipFile(path) as book:
+        names = set(book.namelist())
+        shared = []
+        if "xl/sharedStrings.xml" in names:
+            shared = ["".join(t.text or "" for t in item.iter(_XLSX + "t"))
+                      for item in ElementTree.fromstring(book.read("xl/sharedStrings.xml"))]
+        sheet = ElementTree.fromstring(book.read("xl/worksheets/sheet1.xml"))
+    rows = []
+    for row in sheet.iter(_XLSX + "row"):
+        values = {}
+        for cell in row.findall(_XLSX + "c"):
+            column = re.match(r"[A-Z]+", cell.get("r", "")).group()
+            value = cell.find(_XLSX + "v")
+            if value is None:
+                inline = cell.find(_XLSX + "is")
+                values[column] = "".join(t.text or "" for t in inline.iter(_XLSX + "t")) if inline is not None else ""
+            else:
+                values[column] = shared[int(value.text)] if cell.get("t") == "s" else (value.text or "")
+        rows.append(values)
+    return rows
+
+
+def _taxi_stands(path):
+    """[(미터 좌표, 설명)] 판정 영역 주변 택시승차대. 파일이 없으면 None (자료 없음).
+
+    제목 행 다음의 '순번' 행을 머리글로 씁니다. 머리글의 줄바꿈은 지웁니다 ('좌표\n(Poi_X)' → '좌표(Poi_X)').
+    """
+    if not path.is_file():
+        return None
+    rows = read_xlsx_rows(path)
+    header_index = next((i for i, row in enumerate(rows) if row.get("A", "").strip() == "순번"), None)
+    if header_index is None:
+        raise ValueError(f"{path.name}: '순번' 머리글 행이 없습니다.")
+    header = {column: re.sub(r"\s+", "", name) for column, name in rows[header_index].items()}
+    stands = []
+    for row in rows[header_index + 1:]:
+        item = {header.get(column, column): str(value).strip() for column, value in row.items()}
+        try:
+            position = to_meters(float(item["좌표(Poi_X)"]), float(item["좌표(Poi_Y)"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if math.hypot(*position) <= FACILITY_RADIUS_M:
+            stands.append((position, f"{item.get('위치명', '')} ({item.get('타입', '')}, {item.get('ID주소(신관리번호)', '')})"))
+    return stands
+
+
 PLANNED_ROAD_FILE = "vworld_upis_roads_gangnam.geojson"
 # 도시·군계획시설의 결정·구조 및 설치기준에 관한 규칙 제9조 규모별 구분: 등급별 최소 폭(m).
 # 소로 3류는 '폭 8m 미만'이라 하한이 없습니다.
@@ -302,6 +358,7 @@ def load_map_data(data_dir, sv_dir):
         hd_safe=_hd_lines(surface, lambda p: p.get("kind") == "531"),
         hd_link=_hd_lines(links, lambda p: True),
         images=_images(sv_dir / "metadata.csv"),
+        taxi_stands=_taxi_stands(data_dir / TAXI_STAND_FILE),
     )
 
 

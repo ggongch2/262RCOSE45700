@@ -8,7 +8,7 @@
 [준비] data/ + sv_out/metadata.csv
        ↓ datasets.load_inputs → 후보 Feature 목록 + MapData (미터 좌표)
        ↓ measure.measure_all   ← 지리 계산은 여기서만. 기준값 미사용, 모르면 null
-       data/prepared/measurements.json (pudo-measure.v1) + data/prepared/layers.json
+       data/prepared/measurements.json (pudo-measure.v2) + data/prepared/layers.json
 [판정] 측정값 (+ 선택: --photo-results 사진 판독 JSON)
        ↓ rules.evaluate_all(thresholds=TH, rules_off=())   ← 파일·지리 계산 없음
        ↓ export.write_results
@@ -19,7 +19,7 @@
 
 ### 측정값 (`data/prepared/measurements.json`)
 
-`{schema_version: "pudo-measure.v1", generated_at, count, candidates: [...]}`. 후보 하나의 필드입니다. 거리는 m이며 null은 모름(자료 없음)입니다.
+`{schema_version: "pudo-measure.v2", generated_at, count, candidates: [...]}`. 후보 하나의 필드입니다. 거리는 m이며 null은 모름(자료 없음)입니다.
 
 | 필드 | 내용 |
 |---|---|
@@ -35,6 +35,7 @@
 | `child_zone` | `{mode: "tgis", state: in/near/out, label}` 또는 `{mode: "radius", distance, label}` |
 | `safety_zone` | `{covered, distance}`. 정밀도로지도 안전지대 |
 | `reg_line` | `{tgis_no_stop, tgis_no_park, hd_covered, hd_no_stop, hd_bus, hd_no_park}`. 규제선까지 거리 |
+| `taxi_stand` | `{distance, label, estimated: true}` 또는 null(승차대 파일 없음). 같은 도로·같은 쪽(도로 중심선 기준 연석 쪽, 일방통행 차도는 차도 안 포함) 60m 안의 가장 가까운 서울시 택시승차대까지 **도로를 따라 잰 거리**. 없으면 `distance` null |
 | `image` | `{pano_id}` 또는 null. 후보 ID와 조회 좌표가 맞는 Google 사진 |
 
 ## 원본 입력

@@ -67,7 +67,7 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(default, self.app.evaluate())
         strict = json.loads(self.request("/api/evaluate", {"thresholds": {"H4 소화전": 500}})[1])
         self.assertTrue(all(f["properties"]["verdict"] == "불가" for f in strict["features"]))
-        relaxed = json.loads(self.request("/api/evaluate", {"rules_off": ["H1", "H2", "H3", "H4", "H5", "H6", "H7", "P1", "A1"]})[1])
+        relaxed = json.loads(self.request("/api/evaluate", {"rules_off": ["H1", "H2", "H3", "H4", "H5", "H6", "H7", "H8", "P1", "A1"]})[1])
         self.assertTrue(all(f["properties"]["verdict"] == "가능" for f in relaxed["features"]))
 
     def test_bad_conditions_return_400(self):

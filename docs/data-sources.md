@@ -10,6 +10,7 @@ data/
   layers_gangnam.json, osm_roads_gangnam.json, vworld_*.geojson, hdmap/, tgis/
                                            pudo download로 수집
   child_protection_zones.json              공공데이터포털 API (pudo download, env data_go_kr_api 있을 때)
+  taxi_stands.xlsx                         서울시 택시승차대 운영 목록 (사람이 내려받아 이름만 바꿔 둠)
   raw/                                     사람이 내려받은 원본
     ngii_hdmap/                            국토지리정보원 정밀도로지도
       정밀도로지도 설명 및 안내자료(2023. 5.).pdf   레이어·코드표 설명서
@@ -30,8 +31,11 @@ data/
 | T-GIS 안전표지·노면 문자 | 어린이보호구역 구간 복원 | [서울 OA-15540](https://data.seoul.go.kr/dataList/OA-15540/S/1/datasetView.do), [OA-15535](https://data.seoul.go.kr/dataList/OA-15535/S/1/datasetView.do) | `pudo download` (키 불필요) | `data/tgis/` |
 | 어린이보호구역 지정 시설 | H6: 지정 시설 주변 도로를 확인 필요로 표시 | [전국어린이보호구역표준데이터](https://www.data.go.kr/data/15012891/standard.do) API `tn_pubr_public_child_prtc_zn_api` | 공공데이터포털 활용신청 → env `data_go_kr_api` → `pudo download` (전국을 받아 중심 2km만 저장) | `data/child_protection_zones.json` |
 | 도시계획시설 도로 | P1: 공식 폭 등급 (광로·대로·중로·소로) | VWorld `LT_C_UPISUQ151` | `pudo download` (env `vworld_api`) | `data/vworld_upis_roads_gangnam.geojson` |
+| 서울시 택시승차대 | H8: 승차대 앞 택시 정차 구간 제외 (멘토 요청) | 서울시 택시승차대 운영 목록 2026년판 (`택시승차대 운영 목록_260223.xlsx`, 255개소, 좌표·쉘터형/폴형·도로명주소). 같은 내용의 [열린데이터광장 CSV](https://data.seoul.go.kr/)는 259개소로 더 오래되었고 좌표 오타(`127/02437`)가 있음 | 엑셀 원본을 `data/taxi_stands.xlsx`로 이름만 바꿔 둠. 머리글 `순번` 행과 `좌표(Poi_X)`=경도, `좌표(Poi_Y)`=위도를 읽음 | `data/taxi_stands.xlsx` |
 | 표준노드링크 | 제한속도 (판정 미사용, 점수 후보) | VWorld `LT_L_MOCTLINK` | VWorld 2D 데이터 API로 수동 수집 | `data/vworld_moct_links_gangnam.geojson` |
 | 정밀도로지도 원본 (강남구·서초구 등) | 코드표 확인, 안전표지·노면표시 레이어 | [국토정보플랫폼 정밀도로지도](https://map.ngii.go.kr/ms/pblictn/preciseRoadMap.do) | 공간정보 → 지도정보 → 정밀도로지도 → 벡터데이터 → 지역 선택다운로드 (로그인, 이용목적 입력) | `data/raw/ngii_hdmap/` |
+
+택시승차대 목록에는 시설물 **점 하나**만 있고 택시가 서는 정차 구간(시작·끝)은 없습니다. 정밀도로지도 노면선(구간 코드 없음)과 T-GIS 노면 문자("택시" 0건)에도 없어, 판정은 승차대에서 도로를 따라 택시 1대(6m) 안을 불가, 2대(12m) 안을 확인 필요로 둡니다. 판정 영역 안 승차대는 3곳(테헤란로 116 동경빌딩 앞 쉘터형, 강남대로 지오다노강남점 앞 폴형, 강남대로 CGV 강남점 앞 폴형)이며, 서울시가 설치한 시설만 들어 있어 노면에만 칠한 택시 정차구역은 빠져 있을 수 있습니다.
 
 정밀도로지도 원본은 강남역 구역의 동쪽 일부만 덮습니다. 강남대로·테헤란로는 다운로드 목록에 없고 VWorld API 데이터에만 있으므로, 판정에는 VWorld 데이터를 씁니다.
 
@@ -41,12 +45,6 @@ data/
 |---|---|---|---|
 | 도로명주소 전자지도 (강남구·서초구) | 모든 도로의 도로폭(`ROAD_BT`), 실폭도로 면 | [juso.go.kr 전자지도 신청](http://www.juso.go.kr/externalLink/goUrl.do?menuId=DT05). 11종 레이어 일괄 제공, 구청 이용목적 심사. 좌표계 UTM(GRS80) | `data/raw/juso/`에 보관 후 변환 |
 | 경찰청_전국 보호구역 현황 | 어린이보호구역 실제 경계(geometry) | [공공데이터포털 15142010](https://www.data.go.kr/data/15142010/openapi.do) | 활용신청 현황의 End Point·상세기능 주소 확인 후 수집 |
-
-## 확인 대기
-
-| 항목 | 확인할 것 |
-|---|---|
-| 카카오 로드뷰 | 사진 저장·가공 허용 여부, 방향 지정, 촬영일, 호출 한도 (멘토). [FAQ](https://devtalk.kakao.com/t/faq-api/125610)에는 응답 결과의 별도 저장 불가로 안내 |
 
 ## 정밀도로지도 코드표
 

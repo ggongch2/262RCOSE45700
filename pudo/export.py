@@ -40,6 +40,8 @@ def overlay_layers(map_data):
         "crosswalk": points(map_data.crosswalks),
         "bus": points(map_data.buses),
         "hydrant": points(map_data.hydrants),
+        "taxi_stand": [{"type": "Feature", "geometry": _lonlat(Point(xy)), "properties": {"label": label}}
+                       for xy, label in (map_data.taxi_stands or [])],
         "no_stop_line": [{"type": "Feature", "geometry": _lonlat(LineString(segment)), "properties": {}}
                          for segment in no_stop if len(segment) >= 2],
     }

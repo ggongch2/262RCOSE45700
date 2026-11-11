@@ -188,5 +188,73 @@ class DistanceTests(unittest.TestCase):
         self.assertIsNone(distance_to_segments((0, 0), []))
 
 
+class TaxiStandTests(unittest.TestCase):
+    """H8: 승차대에서 도로를 따라 택시 1대(6m) 안은 불가, 2대(12m) 안은 확인 필요. 길 건너편은 보지 않음."""
+
+    def verdict(self, stand, **properties):
+        feature, data = candidate(), clear_map()
+        feature["properties"].update(properties)
+        data.taxi_stands = [(stand, "테스트 승차대")]
+        return judge(feature, data, rules_off=SIDEWALK_KNOWN)["properties"]
+
+    def test_distance_along_the_road_sets_verdict(self):
+        # candidate()는 heading 90: 연석이 동쪽(+x), 도로는 남북(y) 방향
+        for along, expected in ((5, "불가"), (9, "확인 필요"), (13, "가능")):
+            with self.subTest(along=along):
+                result = self.verdict((2, along))
+                self.assertEqual(result["verdict"], expected)
+                if expected != "가능":
+                    reasons = result["fail_reasons"] + result["check_reasons"]
+                    self.assertTrue(any(reason.startswith("H8") for reason in reasons))
+
+    def test_threshold_change_and_rule_off(self):
+        feature, data = candidate(), clear_map()
+        data.taxi_stands = [((2, 5), "테스트 승차대")]
+        relaxed = dict(TH, **{"H8 택시승강장": 3, "H8 택시승강장 확인": 4})
+        self.assertEqual(judge(feature, data, thresholds=relaxed, rules_off=SIDEWALK_KNOWN)["properties"]["verdict"], "가능")
+        self.assertEqual(judge(feature, data, rules_off=("A1", "H8"))["properties"]["verdict"], "가능")
+
+    def test_opposite_side_of_two_way_road_is_ignored(self):
+        self.assertEqual(self.verdict((-2, 1))["verdict"], "가능")
+
+    def test_stand_inside_oneway_carriageway_belongs_to_its_curb(self):
+        # 중앙분리대로 나뉜 대로의 한쪽 차도: 승차대 좌표가 차도 안에 찍혀도 그 연석의 승차대
+        self.assertEqual(self.verdict((-2, 1), oneway=True, curb_offset_m=5)["verdict"], "불가")
+
+    def test_missing_stand_file_requires_confirmation(self):
+        feature, data = candidate(), clear_map()
+        data.taxi_stands = None
+        result = judge(feature, data, rules_off=SIDEWALK_KNOWN)["properties"]
+        self.assertEqual(result["verdict"], "확인 필요")
+        self.assertIn("H8 택시승차대 자료 없음 (data/taxi_stands.xlsx)", result["check_reasons"])
+
+    def test_reads_seoul_stand_workbook(self):
+        import tempfile
+        import zipfile
+        from pathlib import Path
+        from pudo.datasets import _taxi_stands
+
+        def cell(ref, text):
+            return f'<c r="{ref}" t="inlineStr"><is><t>{text}</t></is></c>'
+        rows = [["□ 서울시 택시승차대 운영목록 (2026년)"],
+                ["순번", "ID주소\n(신관리번호)", "타입", "좌표\n(Poi_X)", "좌표\n(Poi_Y)", "위치명"],
+                ["1", "23-051021", "쉘터형", str(CENTER_LON), str(CENTER_LAT), "테스트 앞"],
+                ["2", "01-011002", "쉘터형", "126.97524", "37.57042", "멀리 있음"],
+                ["3", "x", "폴형", "127/02437", "37.5", "좌표 오타"]]
+        body = "".join(f'<row r="{i + 1}">' + "".join(cell(f"{chr(65 + j)}{i + 1}", v) for j, v in enumerate(row)) + "</row>"
+                       for i, row in enumerate(rows))
+        sheet = ('<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>'
+                 + body + "</sheetData></worksheet>")
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "taxi_stands.xlsx"
+            with zipfile.ZipFile(path, "w") as book:
+                book.writestr("xl/worksheets/sheet1.xml", sheet)
+            stands = _taxi_stands(path)
+            self.assertIsNone(_taxi_stands(Path(temp) / "없음.xlsx"))
+        self.assertEqual(len(stands), 1)
+        self.assertAlmostEqual(stands[0][0][0], 0, places=3)
+        self.assertEqual(stands[0][1], "테스트 앞 (쉘터형, 23-051021)")
+
+
 if __name__ == "__main__":
     unittest.main()

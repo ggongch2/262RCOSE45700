@@ -89,11 +89,11 @@
 const LAYERS = (typeof PUDO_LAYERS === 'object' && PUDO_LAYERS) || {};
 const COLOR = {"가능":"#1a9850","확인 필요":"#f39c12","불가":"#d73027"};
 const PILL = {"가능":"ok","확인 필요":"chk","불가":"ng"};
-const REASONS = {H1:'H1 교차로', H2:'H2 횡단보도', H3:'H3 정류장', H4:'H4 소화전', H5:'H5 규제선·전용차로', H6:'H6 어린이보호구역', H7:'H7 안전지대', P1:'P1 통과 폭·차로', A1:'A1 보도', A2:'A2 사진 판독'};
+const REASONS = {H1:'H1 교차로', H2:'H2 횡단보도', H3:'H3 정류장', H4:'H4 소화전', H5:'H5 규제선·전용차로', H6:'H6 어린이보호구역', H7:'H7 안전지대', H8:'H8 택시승강장', P1:'P1 통과 폭·차로', A1:'A1 보도', A2:'A2 사진 판독'};
 const ROAD = {primary:'대로', primary_link:'대로 연결로', tertiary:'보조간선', residential:'이면도로', service:'골목·단지'};
 const $ = (id) => document.getElementById(id);
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const RULES = {H1:'교차로', H2:'횡단보도', H3:'정류장', H4:'소화전', H5:'규제선·전용차로', H6:'어린이보호구역', H7:'안전지대', P1:'통과 폭·차로', A1:'보도', A2:'연석 막힘(사진)', V0:'사진 대응'};
+const RULES = {H1:'교차로', H2:'횡단보도', H3:'정류장', H4:'소화전', H5:'규제선·전용차로', H6:'어린이보호구역', H7:'안전지대', H8:'택시승강장', P1:'통과 폭·차로', A1:'보도', A2:'연석 막힘(사진)', V0:'사진 대응'};
 const code = (reason) => String(reason).split(' ')[0];
 // 규칙 해제: 끈 규칙의 불가·확인 필요 사유를 빼고 같은 방식(불가 사유 → 불가, 확인 사유 → 확인 필요, 없으면 가능)으로 다시 판정합니다.
 let off = new Set();
@@ -143,6 +143,7 @@ addOverlay('주정차금지선 (T-GIS 2021)', '#e8b500', overlay('no_stop_line',
 addOverlay('횡단보도', '#4dabf7', overlay('crosswalk', {color:'#1c7ed6', fillColor:'#4dabf7', fillOpacity:1, weight:1, radius:3}), false);
 addOverlay('버스정류장', '#9775fa', overlay('bus', {color:'#6741d9', fillColor:'#9775fa', fillOpacity:1, weight:1, radius:4}), false);
 addOverlay('소화전', '#ff6b6b', overlay('hydrant', {color:'#c92a2a', fillColor:'#ff6b6b', fillOpacity:1, weight:1, radius:3}), false);
+addOverlay('택시승차대', '#fcc419', overlay('taxi_stand', {color:'#e67700', fillColor:'#fcc419', fillOpacity:1, weight:1, radius:5, interactive:true}), true);
 L.control.layers({'브이월드 지도': vworld, '브이월드 위성': vworldSat, 'OSM (서버로 열 때만)': osm}, overlays, {collapsed:false, position:'topright'}).addTo(map);
 
 // 규칙 목록은 처음 불러온 판정(기본 조건)에 나온 규칙 코드로 한 번만 만듭니다.

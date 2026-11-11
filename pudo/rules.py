@@ -11,13 +11,13 @@ from .vision import apply_observations, validate_confidence_threshold
 
 RULE_NAMES = {
     "H1": "교차로", "H2": "횡단보도", "H3": "정류장", "H4": "소화전", "H5": "규제선·전용차로",
-    "H6": "어린이보호구역", "H7": "안전지대", "P1": "통과 폭·차로", "A1": "보도", "A2": "연석 막힘(사진)",
+    "H6": "어린이보호구역", "H7": "안전지대", "H8": "택시승강장", "P1": "통과 폭·차로", "A1": "보도", "A2": "연석 막힘(사진)",
     "V0": "사진 대응", "V1": "사진 규제선", "V2": "공사(사진)", "V3": "일시적 점유(사진)",
 }
 
 
 def _within(distance, limit):
-    """거리가 있고 기준 이내인지. 거리 0도 기준 이내로 판단합니다."""
+    """거리가 있고 기준 이내인지."""
     return distance is not None and distance <= limit
 
 
@@ -74,6 +74,20 @@ def _checks(m, th):
             checks.append(dict(item="H7 안전지대", value=f"{d_sz:.1f}m", threshold=f"{th['H7 안전지대']}m 초과", **{"pass": False}, estimated=False)); fails.append(f"H7 안전지대 {d_sz:.1f}m (기준 {th['H7 안전지대']}m)")
         else:
             checks.append(dict(item="H7 안전지대", value=f"{d_sz:.1f}m" if d_sz is not None and d_sz < 9e8 else "없음", threshold=f"{th['H7 안전지대']}m 초과", **{"pass": True}, estimated=False))
+
+    # ① 운영 — 택시승강장. 승차대 목록에는 시설물 점만 있어 정차 구간 길이를 모릅니다.
+    # 택시 1대 길이 안은 불가, 2대 길이 안은 구간에 걸칠 수 있어 확인 필요로 둡니다.
+    taxi, ban, review = m["taxi_stand"], th["H8 택시승강장"], th["H8 택시승강장 확인"]
+    if taxi is None:
+        checks.append(dict(item="H8 택시승강장", value=None, threshold=f"승차대에서 {ban}m 초과", **{"pass": None}, estimated=True))
+        needs.append("H8 택시승차대 자료 없음 (data/taxi_stands.xlsx)")
+    else:
+        d_taxi = taxi["distance"]
+        value = f"{d_taxi:.1f}m, {taxi['label']}" if d_taxi is not None else "같은 쪽 60m 안에 없음"
+        status = False if _within(d_taxi, ban) else None if _within(d_taxi, review) else True
+        checks.append(dict(item="H8 택시승강장", value=value, threshold=f"승차대에서 도로를 따라 {ban}m 초과", **{"pass": status}, estimated=True))
+        if status is False: fails.append(f"H8 택시승강장 {d_taxi:.1f}m (기준 택시 1대 {ban}m, {taxi['label']})")
+        elif status is None: needs.append(f"H8 택시승차대 {d_taxi:.1f}m, 정차 구간 길이 모름 (택시 2대 {review}m 안) → 사진 확인")
 
     # ① 합법 — 규제선. 서울시 2021 자료와 정밀도로지도 2023~25를 교차 확인
     line = m["reg_line"]

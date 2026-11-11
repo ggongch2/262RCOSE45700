@@ -19,7 +19,7 @@ from pathlib import Path
 from .config import DATA_DIR, SV_DIR
 from .geo import distance_to_area, distance_to_lines, distance_to_points, distance_to_segments, to_meters
 
-SCHEMA_VERSION = "pudo-measure.v1"
+SCHEMA_VERSION = "pudo-measure.v2"
 PREPARED_DIR = "prepared"
 MEASUREMENT_FILE = "measurements.json"
 LAYER_FILE = "layers.json"
@@ -27,6 +27,8 @@ HD_COVER_M = 15                       # 후보에서 이 거리 안에 정밀도
 NO_STOP = ("010", "014", "015", "005", "017")   # T-GIS 규제차선 코드: 주정차금지
 NO_PARK = ("009",)                              # T-GIS 규제차선 코드: 주차금지 (정차 가능)
 LANE_SOURCE = {"hdmap": "정밀도로지도", "osm": "OSM"}
+TAXI_SEARCH_M = 60                    # 이 직선거리 안의 택시승차대만 봄 (같은 도로 앞뒤)
+TAXI_SIDEWALK_M = 15                  # 승차대 좌표가 연석에서 바깥(보도·건물 쪽)으로 이만큼까지는 같은 도로로 봄
 
 
 def _round(value):
@@ -56,6 +58,36 @@ def _child_zone(pr, p, data):
     nearest_school = min(((math.hypot(p[0] - s[0], p[1] - s[1]), name) for s, name in data.schools), default=(None, None))
     distance, name = nearest_school
     return {"mode": "radius", "distance": _round(distance), "label": f"{name} {distance:.0f}m" if distance is not None else None}
+
+
+def _taxi_stand(pr, p, data):
+    """같은 도로·같은 쪽에 있는 가장 가까운 택시승차대까지 도로를 따라 잰 거리.
+
+    승차대 목록은 시설물 점 하나만 있고 정차 구간(시작·끝)은 없습니다. 길 건너편 승차대를 빼려고
+    도로 중심선 기준으로 후보와 같은 쪽(연석 쪽)에 있는 승차대만 보고, 진행 방향 성분만 거리로 씁니다.
+    승차대 좌표가 차도 안에 찍힌 경우가 있어 중심선과 연석 사이도 같은 쪽으로 봅니다.
+    일방통행 차도(중앙분리대로 나뉜 대로의 한쪽 포함)는 연석이 오른쪽 하나뿐이라 차도 안 전체를 같은 쪽으로 봅니다.
+    """
+    if data.taxi_stands is None:
+        return None
+    heading = math.radians(pr.get("heading", 0))          # 중심선 → 연석 방향
+    nx, ny = math.sin(heading), math.cos(heading)
+    tx, ty = -ny, nx                                       # 진행 방향
+    offset = pr.get("curb_offset_m") or 0
+    oneway = str(pr.get("oneway", "no")).lower() in ("yes", "true", "1", "-1")
+    center = to_meters(*pr["centerline"]) if pr.get("centerline") else (p[0] - nx * offset, p[1] - ny * offset)
+    best = (None, None)
+    for (x, y), label in data.taxi_stands:
+        if math.hypot(x - p[0], y - p[1]) > TAXI_SEARCH_M:
+            continue
+        across = (x - center[0]) * nx + (y - center[1]) * ny
+        lowest = -offset if oneway else 0
+        if not lowest < across <= offset + TAXI_SIDEWALK_M:
+            continue
+        along = abs((x - p[0]) * tx + (y - p[1]) * ty)
+        if best[0] is None or along < best[0]:
+            best = (along, label)
+    return {"distance": _round(best[0]), "label": best[1], "estimated": True}
 
 
 def _planned_road(pr, p, data):
@@ -134,6 +166,8 @@ def measure(feature, data):
             "hd_bus": _round(distance_to_segments(p, data.hd_bus)) if hd_covered else None,
             "hd_no_park": _round(distance_to_segments(p, data.hd_park)) if hd_covered else None,
         },
+        # 서울시 택시승차대 (시설물 점). None = 자료 없음, distance None = 같은 쪽 60m 안에 없음
+        "taxi_stand": _taxi_stand(pr, p, data),
         "image": _image(pr, p, data),
     }
 
@@ -151,7 +185,8 @@ def _input_files(data_dir, sv_dir):
     data_dir = Path(data_dir)
     names = ["candidates_v1.geojson", "layers_gangnam.json", "osm_roads_gangnam.json", "child_protection_zones.json",
              "child_protection_zones.csv", "vworld_upis_roads_gangnam.geojson", "hdmap/lt_l_a2link.geojson",
-             "hdmap/lt_l_b2surfacelinemark.geojson", "tgis/A064_P_signs.geojson", "tgis/A054_P_text_marks.geojson"]
+             "hdmap/lt_l_b2surfacelinemark.geojson", "tgis/A064_P_signs.geojson", "tgis/A054_P_text_marks.geojson",
+             "taxi_stands.xlsx"]
     files = [data_dir / name for name in names] + [Path(sv_dir) / "metadata.csv"]
     return [path for path in files if path.is_file()]
 
@@ -204,6 +239,7 @@ def summarize(measurements):
         "보도 모름": sum(m["sidewalk"]["value"] is None for m in measurements),
         "도시계획 등급 없음": sum(m["planned_road"] is None for m in measurements),
         "정밀도로지도 미커버": sum(not m["reg_line"]["hd_covered"] for m in measurements),
+        "택시승차대 자료 없음": sum(m["taxi_stand"] is None for m in measurements),
     }
     basis = {}
     for m in measurements:
