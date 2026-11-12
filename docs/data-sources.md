@@ -11,6 +11,7 @@ data/
                                            pudo download로 수집
   child_protection_zones.json              공공데이터포털 API (pudo download, env data_go_kr_api 있을 때)
   taxi_stands.xlsx                         서울시 택시승차대 운영 목록 (사람이 내려받아 이름만 바꿔 둠)
+  tgis/lane_facilities_2023.xlsx           서울시 차선시설물현황 2023-07 (사람이 내려받아 이름만 바꿔 둠)
   raw/                                     사람이 내려받은 원본
     ngii_hdmap/                            국토지리정보원 정밀도로지도
       정밀도로지도 설명 및 안내자료(2023. 5.).pdf   레이어·코드표 설명서
@@ -31,6 +32,7 @@ data/
 | T-GIS 안전표지·노면 문자 | 어린이보호구역 구간 복원 | [서울 OA-15540](https://data.seoul.go.kr/dataList/OA-15540/S/1/datasetView.do), [OA-15535](https://data.seoul.go.kr/dataList/OA-15535/S/1/datasetView.do) | `pudo download` (키 불필요) | `data/tgis/` |
 | 어린이보호구역 지정 시설 | H6: 지정 시설 주변 도로를 확인 필요로 표시 | [전국어린이보호구역표준데이터](https://www.data.go.kr/data/15012891/standard.do) API `tn_pubr_public_child_prtc_zn_api` | 공공데이터포털 활용신청 → env `data_go_kr_api` → `pudo download` (전국을 받아 중심 2km만 저장) | `data/child_protection_zones.json` |
 | 도시계획시설 도로 | P1: 공식 폭 등급 (광로·대로·중로·소로) | VWorld `LT_C_UPISUQ151` | `pudo download` (env `vworld_api`) | `data/vworld_upis_roads_gangnam.geojson` |
+| 서울시 차선시설물현황 (2023-07) | H5: 2021 서울시 금지선이 2023년에도 있는지 확인 (정밀도로지도가 없는 도로) | [서울 OA-15537](https://data.seoul.go.kr/dataList/OA-15537/S/1/datasetView.do)의 `차선시설물현황_0724.xlsx`. 선마다 대표 좌표 점 하나(EPSG:5186)와 차선종류. 같은 데이터셋의 `A058_L_차선.zip`은 2025년에 다시 올라왔지만 안의 shp는 2021-08-09 판 | 엑셀을 `data/tgis/lane_facilities_2023.xlsx`로 이름만 바꿔 둠. 공유 zip에 포함 | `data/tgis/lane_facilities_2023.xlsx` |
 | 서울시 택시승차대 | H8: 승차대 앞 택시 정차 구간 제외 (멘토 요청) | 서울시 택시승차대 운영 목록 2026년판 (`택시승차대 운영 목록_260223.xlsx`, 255개소, 좌표·쉘터형/폴형·도로명주소). 같은 내용의 [열린데이터광장 CSV](https://data.seoul.go.kr/)는 259개소로 더 오래되었고 좌표 오타(`127/02437`)가 있음 | 엑셀 원본을 `data/taxi_stands.xlsx`로 이름만 바꿔 둠. 머리글 `순번` 행과 `좌표(Poi_X)`=경도, `좌표(Poi_Y)`=위도를 읽음 | `data/taxi_stands.xlsx` |
 | 표준노드링크 | 제한속도 (판정 미사용, 점수 후보) | VWorld `LT_L_MOCTLINK` | VWorld 2D 데이터 API로 수동 수집 | `data/vworld_moct_links_gangnam.geojson` |
 | 정밀도로지도 원본 (강남구·서초구 등) | 코드표 확인, 안전표지·노면표시 레이어 | [국토정보플랫폼 정밀도로지도](https://map.ngii.go.kr/ms/pblictn/preciseRoadMap.do) | 공간정보 → 지도정보 → 정밀도로지도 → 벡터데이터 → 지역 선택다운로드 (로그인, 이용목적 입력) | `data/raw/ngii_hdmap/` |
@@ -66,6 +68,8 @@ data/
 | 599 | 기타선 | | |
 
 판정 사용: 515+111/121 주정차금지(실선), 515+112 주차금지(점선), 504 버스전용, 531 안전지대.
+
+H5 조합: 정밀도로지도가 덮는 도로는 서울시 2021 선과 정밀도로지도를 대조합니다. 덮지 않는 도로는 2021 선이 2023 서울시 차선 목록에도 있으면(같은 종류의 점이 선에서 3m 안) 불가, 없으면 확인 필요입니다. 2023 목록은 점뿐이라 2021년에 없던 새 선은 구간을 알 수 없어 쓰지 않습니다.
 
 **B3_SURFACEMARK 노면표시**
 

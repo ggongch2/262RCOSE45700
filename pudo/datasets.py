@@ -41,6 +41,7 @@ class MapData:
     hd_link: list = field(default_factory=list)
     images: dict = field(default_factory=dict)
     taxi_stands: list = field(default_factory=list)      # [(좌표, 설명)] 서울시 택시승차대. None이면 자료 없음
+    lines_2023: dict = None                              # {선 코드: [2023 목록에도 있는지]} lines와 같은 순서. None이면 2023 목록 없음
 
 
 def read_json(path):
@@ -245,21 +246,23 @@ def read_xlsx_rows(path):
     return rows
 
 
-def _taxi_stands(path):
-    """[(미터 좌표, 설명)] 판정 영역 주변 택시승차대. 파일이 없으면 None (자료 없음).
+def read_xlsx_table(path):
+    """엑셀 첫 시트를 [{머리글: 값}]으로. 제목 행 아래 '순번'이 있는 행을 머리글로 쓰고 머리글의 공백·줄바꿈은 지웁니다."""
+    rows = read_xlsx_rows(path)
+    header_index = next((i for i, row in enumerate(rows) if any(str(v).strip() == "순번" for v in row.values())), None)
+    if header_index is None:
+        raise ValueError(f"{Path(path).name}: '순번' 머리글 행이 없습니다.")
+    header = {column: re.sub(r"\s+", "", name) for column, name in rows[header_index].items() if str(name).strip()}
+    return [{header[column]: str(value).strip() for column, value in row.items() if column in header}
+            for row in rows[header_index + 1:]]
 
-    제목 행 다음의 '순번' 행을 머리글로 씁니다. 머리글의 줄바꿈은 지웁니다 ('좌표\n(Poi_X)' → '좌표(Poi_X)').
-    """
+
+def _taxi_stands(path):
+    """[(미터 좌표, 설명)] 판정 영역 주변 택시승차대. 파일이 없으면 None (자료 없음)."""
     if not path.is_file():
         return None
-    rows = read_xlsx_rows(path)
-    header_index = next((i for i, row in enumerate(rows) if row.get("A", "").strip() == "순번"), None)
-    if header_index is None:
-        raise ValueError(f"{path.name}: '순번' 머리글 행이 없습니다.")
-    header = {column: re.sub(r"\s+", "", name) for column, name in rows[header_index].items()}
     stands = []
-    for row in rows[header_index + 1:]:
-        item = {header.get(column, column): str(value).strip() for column, value in row.items()}
+    for item in read_xlsx_table(path):
         try:
             position = to_meters(float(item["좌표(Poi_X)"]), float(item["좌표(Poi_Y)"]))
         except (KeyError, TypeError, ValueError):
@@ -267,6 +270,52 @@ def _taxi_stands(path):
         if math.hypot(*position) <= FACILITY_RADIUS_M:
             stands.append((position, f"{item.get('위치명', '')} ({item.get('타입', '')}, {item.get('ID주소(신관리번호)', '')})"))
     return stands
+
+
+LANE_2023_FILE = "tgis/lane_facilities_2023.xlsx"   # 서울시 차선시설물현황 (OA-15537 차선시설물현황_0724.xlsx, 2023-07)
+LANE_2023_KINDS = {"주정차금지": "010", "버스정차구획선": "015", "정차금지지대": "014"}   # 2021 T-GIS 선 코드와 대응
+LANE_MATCH_M = 3   # 2023 목록의 점이 2021 선에서 이 거리 안이면 같은 선 (좌표 대조 허용 오차, 판정 기준값 아님)
+
+
+def _lane_points_2023(path):
+    """{2021 선 코드: [미터 좌표]} 2023년 목록의 금지선 대표점 (선마다 점 하나). 파일이 없으면 None."""
+    if not path.is_file():
+        return None
+    from pyproj import Transformer
+    to_wgs84 = Transformer.from_crs(5186, 4326, always_xy=True)   # T-GIS: KGD2002 중부원점
+    points = defaultdict(list)
+    for item in read_xlsx_table(path):
+        code = LANE_2023_KINDS.get(item.get("차선종류"))
+        if code is None:
+            continue
+        try:
+            position = to_meters(*to_wgs84.transform(float(item["X좌표"]), float(item["Y좌표"])))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if math.hypot(*position) <= FACILITY_RADIUS_M:
+            points[code].append(position)
+    return dict(points)
+
+
+def _confirm_2023(lines, points):
+    """{코드: [2023 목록에도 있는지]} 2021 선마다 같은 종류의 2023 점이 선 위(3m 안)에 있는지. 목록이 없으면 None."""
+    if points is None:
+        return None
+    from shapely.geometry import LineString, Point
+    from shapely.strtree import STRtree
+    confirmed = {}
+    for code, segments in lines.items():
+        candidates = [Point(xy) for xy in points.get(code, [])]
+        tree = STRtree(candidates) if candidates else None
+        flags = []
+        for segment in segments:
+            if tree is None or len(segment) < 2:
+                flags.append(False)
+                continue
+            line = LineString(segment)
+            flags.append(any(line.distance(candidates[i]) <= LANE_MATCH_M for i in tree.query(line.buffer(LANE_MATCH_M))))
+        confirmed[code] = flags
+    return confirmed
 
 
 PLANNED_ROAD_FILE = "vworld_upis_roads_gangnam.geojson"
@@ -359,6 +408,7 @@ def load_map_data(data_dir, sv_dir):
         hd_link=_hd_lines(links, lambda p: True),
         images=_images(sv_dir / "metadata.csv"),
         taxi_stands=_taxi_stands(data_dir / TAXI_STAND_FILE),
+        lines_2023=_confirm_2023(dict(lines), _lane_points_2023(data_dir / LANE_2023_FILE)),
     )
 
 

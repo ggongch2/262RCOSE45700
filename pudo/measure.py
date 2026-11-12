@@ -17,9 +17,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import DATA_DIR, SV_DIR
-from .geo import distance_to_area, distance_to_lines, distance_to_points, distance_to_segments, to_meters
+from .geo import distance_to_area, distance_to_lines, distance_to_points, distance_to_segment, distance_to_segments, to_meters
 
-SCHEMA_VERSION = "pudo-measure.v2"
+SCHEMA_VERSION = "pudo-measure.v3"
 PREPARED_DIR = "prepared"
 MEASUREMENT_FILE = "measurements.json"
 LAYER_FILE = "layers.json"
@@ -58,6 +58,19 @@ def _child_zone(pr, p, data):
     nearest_school = min(((math.hypot(p[0] - s[0], p[1] - s[1]), name) for s, name in data.schools), default=(None, None))
     distance, name = nearest_school
     return {"mode": "radius", "distance": _round(distance), "label": f"{name} {distance:.0f}m" if distance is not None else None}
+
+
+def _no_stop_2023(p, data):
+    """후보에서 가장 가까운 2021 주정차금지 선이 2023 목록에도 있는지. 2023 목록이 없거나 2021 선이 없으면 None."""
+    if data.lines_2023 is None:
+        return None
+    nearest = min(((distance_to_segment(p, segment), code, index) for code in NO_STOP
+                   for index, segment in enumerate(data.lines.get(code, ()))), default=None)
+    if nearest is None:
+        return None
+    _, code, index = nearest
+    flags = data.lines_2023.get(code, [])
+    return bool(flags[index]) if index < len(flags) else False
 
 
 def _taxi_stand(pr, p, data):
@@ -161,6 +174,7 @@ def measure(feature, data):
         "reg_line": {
             "tgis_no_stop": _round(distance_to_lines(p, data.lines, NO_STOP)),
             "tgis_no_park": _round(distance_to_lines(p, data.lines, NO_PARK)),
+            "tgis_no_stop_2023": _no_stop_2023(p, data),   # 가장 가까운 2021 금지선이 2023 목록에도 있나 (None: 목록 없음)
             "hd_covered": hd_covered,
             "hd_no_stop": _round(distance_to_segments(p, data.hd_reg)) if hd_covered else None,
             "hd_bus": _round(distance_to_segments(p, data.hd_bus)) if hd_covered else None,
@@ -186,7 +200,7 @@ def _input_files(data_dir, sv_dir):
     names = ["candidates_v1.geojson", "layers_gangnam.json", "osm_roads_gangnam.json", "child_protection_zones.json",
              "child_protection_zones.csv", "vworld_upis_roads_gangnam.geojson", "hdmap/lt_l_a2link.geojson",
              "hdmap/lt_l_b2surfacelinemark.geojson", "tgis/A064_P_signs.geojson", "tgis/A054_P_text_marks.geojson",
-             "taxi_stands.xlsx"]
+             "taxi_stands.xlsx", "tgis/lane_facilities_2023.xlsx"]
     files = [data_dir / name for name in names] + [Path(sv_dir) / "metadata.csv"]
     return [path for path in files if path.is_file()]
 

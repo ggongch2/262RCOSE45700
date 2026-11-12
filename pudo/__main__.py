@@ -29,7 +29,11 @@ def check():
         "hdmap/lt_l_b2surfacelinemark.geojson",
         "vworld_road_parcels_gangnam.geojson",
         "vworld_upis_roads_gangnam.geojson",
+        "tgis/A064_P_signs.geojson",
+        "tgis/A054_P_text_marks.geojson",
+        "tgis/lane_facilities_2023.xlsx",
         "child_protection_zones.json",
+        "taxi_stands.xlsx",
         "candidates_v1.geojson",
     ):
         print(f"data/{name}: {'있음' if (DATA_DIR / name).is_file() else '없음'}")

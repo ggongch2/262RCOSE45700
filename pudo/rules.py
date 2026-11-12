@@ -98,11 +98,15 @@ def _checks(m, th):
     if tgis_ban and hd_ban:
         curb = "yellow_solid"; checks.append(dict(item="H5 규제선", value="주정차금지 구간 (2021 서울시 + 2023 정밀도로지도 일치)", threshold="금지 구간 아님", **{"pass": False}, estimated=False)); fails.append("H5 주정차금지 구간 (두 자료 일치)")
     elif tgis_ban and hd_cov:
-        curb = "unknown"; checks.append(dict(item="H5 규제선", value="2021 서울시: 금지 / 2023 정밀도로지도: 없음", threshold="금지 구간 아님", **{"pass": None}, estimated=True)); needs.append("H5 규제선 자료 불일치 (2021 금지, 2023 없음) → 사진 확인")
+        curb = "unknown"; checks.append(dict(item="H5 규제선", value="2021 서울시: 금지 / 2023 정밀도로지도: 없음", threshold="금지 구간 아님", **{"pass": None}, estimated=True)); needs.append("H5 규제선 자료 불일치 (서울시 2021 금지, 정밀도로지도 없음) → 사진 확인")
+    elif tgis_ban and line.get("tgis_no_stop_2023") is True:
+        curb = "yellow_solid"; checks.append(dict(item="H5 규제선", value="주정차금지 구간 (2021 서울시 선, 2023 서울시 목록에도 있음)", threshold="금지 구간 아님", **{"pass": False}, estimated=False)); fails.append("H5 주정차금지 구간 (2021 선 + 2023 목록)")
+    elif tgis_ban and line.get("tgis_no_stop_2023") is False:
+        curb = "unknown"; checks.append(dict(item="H5 규제선", value="2021 서울시: 금지 / 2023 서울시 목록: 없음", threshold="금지 구간 아님", **{"pass": None}, estimated=True)); needs.append("H5 2021 주정차금지선이 2023 목록에 없음 → 사진 확인")
     elif tgis_ban:
         curb = "yellow_solid"; checks.append(dict(item="H5 규제선", value="주정차금지 구간 (2021 서울시 자료, 교차 확인 불가)", threshold="금지 구간 아님", **{"pass": False}, estimated=True)); fails.append("H5 주정차금지 구간 (2021 서울시 자료, 단일 출처)")
     elif hd_ban:
-        curb = "unknown"; checks.append(dict(item="H5 규제선", value="2021 서울시: 없음 / 2023 정밀도로지도: 규제선 있음", threshold="금지 구간 아님", **{"pass": None}, estimated=True)); needs.append("H5 규제선 자료 불일치 (2021 없음, 2023 있음) → 사진 확인")
+        curb = "unknown"; checks.append(dict(item="H5 규제선", value="2021 서울시: 없음 / 2023 정밀도로지도: 규제선 있음", threshold="금지 구간 아님", **{"pass": None}, estimated=True)); needs.append("H5 규제선 자료 불일치 (서울시 2021 없음, 정밀도로지도 있음) → 사진 확인")
     elif hd_cov and _within(line["hd_bus"], hd_th):
         curb = "unknown"; checks.append(dict(item="H5 규제선", value="버스전용차로 (2023 정밀도로지도). 시간제면 심야 가능", threshold="금지 구간 아님", **{"pass": None}, estimated=True)); needs.append("H5 버스전용차로, 운영 시간 확인 (표지)")
     elif _within(line["tgis_no_park"], th["H5 규제선"]) or (hd_cov and _within(line["hd_no_park"], hd_th)):

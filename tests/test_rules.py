@@ -76,7 +76,7 @@ class RuleTests(unittest.TestCase):
         data.hd_reg = [[(-50, 0), (50, 0)]]  # 후보점이 규제선 위에 있음 (거리 0)
         result = judge(feature, data)
         self.assertEqual(result["properties"]["verdict"], "확인 필요")
-        self.assertIn("H5 규제선 자료 불일치 (2021 없음, 2023 있음) → 사진 확인", result["properties"]["check_reasons"])
+        self.assertIn("H5 규제선 자료 불일치 (서울시 2021 없음, 정밀도로지도 있음) → 사진 확인", result["properties"]["check_reasons"])
 
     def test_hdmap_curb_threshold_is_configurable(self):
         feature, data = candidate(), clear_map()
@@ -254,6 +254,60 @@ class TaxiStandTests(unittest.TestCase):
         self.assertEqual(len(stands), 1)
         self.assertAlmostEqual(stands[0][0][0], 0, places=3)
         self.assertEqual(stands[0][1], "테스트 앞 (쉘터형, 23-051021)")
+
+
+class Lane2023Tests(unittest.TestCase):
+    """H5: 정밀도로지도가 없는 도로의 2021 서울시 금지선을 2023 서울시 차선 목록으로 확인."""
+
+    def judge_line(self, confirmed):
+        feature, data = candidate(), clear_map()
+        data.lines = {"010": [[(-50, 1), (50, 1)]]}
+        data.lines_2023 = None if confirmed is None else {"010": [confirmed]}
+        return judge(feature, data, rules_off=SIDEWALK_KNOWN)["properties"]
+
+    def test_confirmed_line_is_fail_without_estimate(self):
+        result = self.judge_line(True)
+        self.assertEqual(result["verdict"], "불가")
+        self.assertIn("H5 주정차금지 구간 (2021 선 + 2023 목록)", result["fail_reasons"])
+        self.assertFalse(next(c for c in result["checks"] if c["item"] == "H5 규제선")["estimated"])
+
+    def test_line_missing_in_2023_requires_photo(self):
+        result = self.judge_line(False)
+        self.assertEqual(result["verdict"], "확인 필요")
+        self.assertIn("H5 2021 주정차금지선이 2023 목록에 없음 → 사진 확인", result["check_reasons"])
+
+    def test_without_2023_list_keeps_single_source_fail(self):
+        self.assertIn("H5 주정차금지 구간 (2021 서울시 자료, 단일 출처)", self.judge_line(None)["fail_reasons"])
+
+    def test_reads_seoul_lane_workbook_and_matches_lines(self):
+        import tempfile
+        import zipfile
+        from pathlib import Path
+        from pyproj import Transformer
+        from pudo.datasets import _confirm_2023, _lane_points_2023
+
+        x, y = Transformer.from_crs(4326, 5186, always_xy=True).transform(CENTER_LON, CENTER_LAT)
+
+        def cell(ref, text):
+            return f'<c r="{ref}" t="inlineStr"><is><t>{text}</t></is></c>'
+        rows = [["", "차선 시설물 현황"],
+                ["", "순번", "자치구", "차선종류", "차선중분류", "도로구분", "X좌표", "Y좌표"],
+                ["", "1", "강남구", "주정차금지", "황색실선", "구도", str(x), str(y)],
+                ["", "2", "강남구", "차선", "백색점선", "구도", str(x), str(y)]]
+        body = "".join(f'<row r="{i + 1}">' + "".join(cell(f"{chr(65 + j)}{i + 1}", v) for j, v in enumerate(row) if v) + "</row>"
+                       for i, row in enumerate(rows))
+        sheet = '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>' + body + "</sheetData></worksheet>"
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "lanes.xlsx"
+            with zipfile.ZipFile(path, "w") as book:
+                book.writestr("xl/worksheets/sheet1.xml", sheet)
+            points = _lane_points_2023(path)
+            self.assertIsNone(_lane_points_2023(Path(temp) / "없음.xlsx"))
+        self.assertEqual(list(points), ["010"])
+        self.assertEqual(len(points["010"]), 1)
+        lines = {"010": [[(-20, 1), (20, 1)], [(-20, 30), (20, 30)]]}
+        self.assertEqual(_confirm_2023(lines, points), {"010": [True, False]})
+        self.assertIsNone(_confirm_2023(lines, None))
 
 
 if __name__ == "__main__":
