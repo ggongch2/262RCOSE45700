@@ -129,8 +129,11 @@ def load_assessments(path):
     return parse_assessments(payload)
 
 
-def apply_observations(assessment, feature, image, checks, fails, needs, *, min_confidence):
-    """관측값을 기존 규칙 결과에 병합합니다. 지도 hard fail은 제거하지 않습니다."""
+def apply_observations(assessment, feature, image, checks, fails, needs, *, min_confidence, map_sidewalk=None):
+    """관측값을 기존 규칙 결과에 병합합니다. 지도 hard fail은 제거하지 않습니다.
+
+    map_sidewalk: 1:1000 수치지형도의 보도 유무(True/False/None). 사진과 다르면 확인 필요로 둡니다.
+    """
     report = assessment.as_dict()
     report.update({"schema_version": SCHEMA_VERSION, "min_confidence": min_confidence,
                    "status": "applied", "used_fields": [], "review_reasons": []})
@@ -159,7 +162,12 @@ def apply_observations(assessment, feature, image, checks, fails, needs, *, min_
         report["used_fields"].append(name)
         if name == "sidewalk":
             passed, display = value, "있음" if value else "없음"
-            if not value:
+            if map_sidewalk is not None and map_sidewalk != value:
+                reason = f"A1 보도 지도(1:1000 {'있음' if map_sidewalk else '없음'})와 사진 판독({display}) 불일치"
+                needs.append(reason)
+                report["review_reasons"].append(reason)
+                passed = None
+            elif not value:
                 fails.append("A1 사진 판독: 보도 없음")
         elif name == "curb_blocked":
             passed, display = not value, "막힘" if value else "연결됨"

@@ -152,6 +152,32 @@ def fetch_child_zones(key, radius_m=2000):
             "count": len(nearby), "items": nearby}
 
 
+POLICE_ZONE_API = "https://apis.data.go.kr/1320000/safetyzonedtlinfo/getdtllist"   # 경찰청_전국 보호구역 현황 (15142010)
+POLICE_ZONE_SGG = ("11680", "11650")   # 강남구, 서초구. 시군구 코드가 필수이고 하루 300건 제한이라 두 구만 받습니다
+
+
+def fetch_police_zones(key):
+    """경찰청 보호구역 경계(WKT, EPSG:5181). 구마다 100건씩 페이지로 받아 원본 그대로 저장합니다."""
+    items = []
+    for sgg in POLICE_ZONE_SGG:
+        page = 1
+        while True:
+            response = request_json(POLICE_ZONE_API, {"serviceKey": key, "pageNo": page, "numOfRows": 100, "sggCd": sgg, "type": "json"})
+            header = response.get("response", response).get("header", {})
+            if header.get("resultCode") != "00":
+                raise DownloadError(f"경찰청 보호구역 API: 오류 ({header.get('resultCode', 'unknown')})")
+            body = response.get("response", response).get("body") or {}
+            current = (body.get("items") or {}).get("item") or []
+            current = current if isinstance(current, list) else [current]
+            items += current
+            if not current or page * 100 >= int(body.get("totalCount", 0)):
+                break
+            page += 1
+    if not items:
+        raise DownloadError("경찰청 보호구역 API: 결과가 비어 있습니다.")
+    return {"source": POLICE_ZONE_API, "sgg": list(POLICE_ZONE_SGG), "crs": "EPSG:5181", "count": len(items), "items": items}
+
+
 def fetch_hdmap(key, layer, bbox, depth=0):
     """WFS 결과가 상한에 걸리면 영역을 분할하고 ID로 중복 제거."""
     response = request_json(VWORLD_WFS, {
@@ -324,8 +350,9 @@ def main(argv=None):
     zone_key = api_key("datagokr")
     if zone_key:
         tasks.append(("child_protection_zones.json", "download", CHILD_ZONE_API, lambda: fetch_child_zones(zone_key)))
+        tasks.append(("child_zones_police.json", "download", POLICE_ZONE_API, lambda: fetch_police_zones(zone_key)))
     else:
-        print("건너뜀: child_protection_zones.json (env의 data_go_kr_api 없음, 보호구역 지정 시설 없이 판정)", flush=True)
+        print("건너뜀: child_protection_zones.json, child_zones_police.json (env의 data_go_kr_api 없음, 보호구역 지정 시설·경계 없이 판정)", flush=True)
     manifest_path = args.out / "download_manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.is_file() else {"files": {}}
     manifest.update({"center": [CENTER_LON, CENTER_LAT], "bbox": bbox, "crs": "EPSG:4326", "complete": False})

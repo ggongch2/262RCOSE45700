@@ -137,7 +137,8 @@ function overlay(name, style) {
 const overlays = {};
 const addOverlay = (label, swatch, layer, on) => { if (!layer) return; overlays[`<span class="sw" style="background:${swatch}"></span>${label}`] = layer; if (on) layer.addTo(map); };
 addOverlay('교차로 면 (가장자리 5m 금지)', '#f4a259', overlay('intersection', {color:'#d9480f', weight:1, fillColor:'#f4a259', fillOpacity:.35}), true);
-addOverlay('어린이보호구역 추정 구간', '#2b8a3e', overlay('child_zone', {color:'#2b8a3e', weight:6, opacity:.55}), true);
+addOverlay('어린이보호구역 (경찰청 경계, 없으면 추정 구간)', '#2b8a3e', overlay('child_zone', {color:'#2b8a3e', weight:3, opacity:.7, fillOpacity:.25}), true);
+addOverlay('보도 (1:1000 수치지형도)', '#748ffc', overlay('sidewalk', {color:'#4263eb', weight:1, fillColor:'#748ffc', fillOpacity:.4}), false);
 addOverlay('보호구역 근거 (표지·노면)', '#69db7c', overlay('child_zone_evidence', {color:'#2b8a3e', fillColor:'#69db7c', fillOpacity:1, weight:1, radius:3, interactive:true}), false);
 addOverlay('주정차금지선 (T-GIS 2021)', '#e8b500', overlay('no_stop_line', {color:'#e8b500', weight:3, opacity:.8}), false);
 addOverlay('횡단보도', '#4dabf7', overlay('crosswalk', {color:'#1c7ed6', fillColor:'#4dabf7', fillOpacity:1, weight:1, radius:3}), false);

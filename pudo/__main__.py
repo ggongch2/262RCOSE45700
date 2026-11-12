@@ -33,10 +33,13 @@ def check():
         "tgis/A054_P_text_marks.geojson",
         "tgis/lane_facilities_2023.xlsx",
         "child_protection_zones.json",
+        "child_zones_police.json",
         "taxi_stands.xlsx",
         "candidates_v1.geojson",
     ):
         print(f"data/{name}: {'있음' if (DATA_DIR / name).is_file() else '없음'}")
+    sheets = sorted((DATA_DIR / "map1000").glob("*/N1L_A0020000.shp")) if (DATA_DIR / "map1000").is_dir() else []
+    print(f"data/map1000/: {'있음 (지도 ' + str(len(sheets)) + '칸)' if sheets else '없음'}")
     print("키 설정 여부만 확인했습니다. API 인증 및 네트워크 호출은 수행하지 않았습니다.")
 
 

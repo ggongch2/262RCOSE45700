@@ -7,7 +7,7 @@ from pudo.geo import distance_to_points, distance_to_segment, distance_to_segmen
 from pudo.measure import measure
 from pudo.rules import evaluate, evaluate_all
 from support import judge
-from shapely.geometry import LineString, box
+from shapely.geometry import LineString, Point, box
 
 
 def candidate():
@@ -131,7 +131,7 @@ class MeasurementTests(unittest.TestCase):
         self.assertIsNone(m["lanes"]["value"]); self.assertIsNone(m["sidewalk"]["value"])
         self.assertTrue(m["position"]["estimated"])
         result = judge(feature, clear_map())["properties"]
-        self.assertIn("P1 차로 수 모름 (정밀도로지도·OSM에 없음)", result["check_reasons"])
+        self.assertIn("P1 차로 수 모름 (1:1000·정밀도로지도·OSM에 없음)", result["check_reasons"])
         self.assertIn("A1 보도 유무 모름 (사진 필요)", result["check_reasons"])
         self.assertEqual(result["verdict"], "확인 필요")
 
@@ -308,6 +308,128 @@ class Lane2023Tests(unittest.TestCase):
         lines = {"010": [[(-20, 1), (20, 1)], [(-20, 30), (20, 30)]]}
         self.assertEqual(_confirm_2023(lines, points), {"010": [True, False]})
         self.assertIsNone(_confirm_2023(lines, None))
+
+
+class PoliceZoneTests(unittest.TestCase):
+    """H6: 경찰청 지정 경계가 있으면 그것으로 판정. 경계 바로 밖은 확인 필요, 표지와 어긋나면 확인 필요."""
+
+    def judge_zone(self, area, **extra):
+        feature, data = candidate(), clear_map()
+        data.police_zones = [(area, "테스트초등학교")]
+        for name, value in extra.items():
+            setattr(data, name, value)
+        return judge(feature, data, rules_off=SIDEWALK_KNOWN)["properties"]
+
+    def test_inside_is_hard_fail(self):
+        result = self.judge_zone(box(-20, -20, 20, 20))
+        self.assertEqual(result["verdict"], "불가")
+        self.assertIn("H6 어린이보호구역 (경찰청 지정 구역 안, 테스트초등학교)", result["fail_reasons"])
+
+    def test_just_outside_boundary_needs_check(self):
+        result = self.judge_zone(box(3, -20, 40, 20))
+        self.assertEqual(result["verdict"], "확인 필요")
+        self.assertTrue(any(reason.startswith("H6 어린이보호구역 경계 3m") for reason in result["check_reasons"]))
+
+    def test_far_outside_passes_even_near_school(self):
+        feature, data = candidate(), clear_map()
+        data.schools = [((100, 0), "학교")]            # 반경 규칙이면 불가였을 위치
+        data.police_zones = [(box(200, 200, 240, 240), "먼 학교")]
+        result = judge(feature, data, rules_off=SIDEWALK_KNOWN)["properties"]
+        self.assertEqual(result["verdict"], "가능")
+
+    def test_sign_estimate_inside_but_police_outside_needs_check(self):
+        result = self.judge_zone(box(200, 200, 240, 240), child_zone=box(-30, -30, 30, 30))
+        self.assertIn("H6 표지로는 보호구역 안, 경찰청 경계 밖 → 표지·사진 확인", result["check_reasons"])
+
+    def test_reads_police_api_file(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        from pyproj import Transformer
+        from pudo.datasets import _police_zones
+
+        x, y = Transformer.from_crs(4326, 5181, always_xy=True).transform(CENTER_LON, CENTER_LAT)
+        square = f"POLYGON(({x - 10} {y - 10},{x + 10} {y - 10},{x + 10} {y + 10},{x - 10} {y + 10},{x - 10} {y - 10}))"
+        items = [{"fcltTypeCd": "1", "useYn": "Y", "trgtFcltNm": "어린이집", "fturGeomVl": f"GEOMETRYCOLLECTION(POINT({x} {y}),{square})"},
+                 {"fcltTypeCd": "2", "useYn": "Y", "trgtFcltNm": "경로당", "fturGeomVl": square}]
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "zones.json"
+            path.write_text(json.dumps({"items": items}), encoding="utf-8")
+            zones = _police_zones(path)
+            self.assertIsNone(_police_zones(Path(temp) / "none.json"))
+        self.assertEqual([name for _, name in zones], ["어린이집"])
+        area = zones[0][0]
+        self.assertAlmostEqual(area.area, 400, delta=5)
+        self.assertTrue(area.contains(Point(0, 0)))
+
+
+class Map1000Tests(unittest.TestCase):
+    """1:1000 수치지형도: 차로수(양방향 합)·차도 폭으로 P1, 보도 면은 A1 근거(확인 필요)로만."""
+
+    def map1000(self, total=4, oneway=False, sidewalk=True, road_width=24.0):
+        from pudo.datasets import Map1000
+        line = LineString([(-50, 0), (50, 0)])                       # 후보 중심선(0,0)과 같은 동서 방향 도로
+        road, walk = box(-50, -12, 50, 12), box(-50, 5, 50, 12)      # 도로경계 24m, 북쪽(연석 쪽, heading 0)에 보도 7m
+        walks = [(walk, 7.0)] if sidewalk else []
+        return Map1000(lines=[(line, total, oneway, "테스트로", road_width)], carriageway=road.difference(walk) if sidewalk else road, sidewalks=walks)
+
+    def judge_map(self, rules_off=("A1",), **options):
+        feature, data = candidate(), clear_map()
+        feature["properties"].update({"centerline": [CENTER_LON, CENTER_LAT], "heading": 0, "lanes_source": "default", "lanes": 1})
+        data.map1000 = self.map1000(**options)
+        return measure(feature, data), judge(feature, data, rules_off=rules_off)["properties"]
+
+    def test_lanes_total_is_split_by_direction(self):
+        m, result = self.judge_map(total=4)
+        self.assertEqual(m["map1000"]["lanes_total"], 4)
+        lane = next(c for c in result["checks"] if c["item"] == "P1 잔여 차로")
+        self.assertEqual(lane["value"], "편도 2차로 (1:1000 수치지형도)")
+        self.assertEqual(result["verdict"], "가능")
+
+    def test_carriageway_width_excludes_sidewalk(self):
+        m, result = self.judge_map(total=1)
+        self.assertAlmostEqual(m["map1000"]["carriageway_width"], 17.0, places=3)   # 도로폭 24 - 보도 7
+        self.assertAlmostEqual(m["map1000"]["curb_offset"], 5.0, places=3)
+        width = next(c for c in result["checks"] if c["item"] == "P1 통과 폭")
+        self.assertTrue(width["pass"])
+        self.assertIn("차도 폭 17.0m (1:1000 도로폭−보도폭)", width["value"])
+
+    def test_width_uses_written_road_width_minus_sidewalk(self):
+        feature, data = candidate(), clear_map()
+        feature["properties"].update({"centerline": [CENTER_LON, CENTER_LAT], "heading": 0, "lanes_source": "default", "lanes": 1})
+        data.map1000 = self.map1000(total=1, road_width=10.0)          # 10 - 보도 7 = 3m
+        result = judge(feature, data, rules_off=("A1",))["properties"]
+        self.assertIn("P1 통과 폭 부족 (차도 3.0m, 1:1000, 양방향)", result["fail_reasons"])
+
+    def test_narrow_carriageway_fails(self):
+        thresholds = dict(TH, **{"P1 통과폭": 20})
+        feature, data = candidate(), clear_map()
+        feature["properties"].update({"centerline": [CENTER_LON, CENTER_LAT], "heading": 0, "lanes_source": "default", "lanes": 1})
+        data.map1000 = self.map1000(total=1)
+        result = judge(feature, data, thresholds=thresholds, rules_off=("A1",))["properties"]
+        self.assertTrue(any(reason.startswith("P1 통과 폭 부족 (차도 17.0m") for reason in result["fail_reasons"]))
+
+    def test_sidewalk_on_map_is_only_a_hint(self):
+        m, result = self.judge_map(rules_off=())
+        self.assertTrue(m["map1000"]["sidewalk"])
+        self.assertEqual(result["verdict"], "확인 필요")
+        self.assertIn("A1 보도 지도상 있음 (폭 7.0m) (1:1000) → 로드뷰 확인", result["check_reasons"])
+        _, result = self.judge_map(rules_off=(), sidewalk=False)
+        self.assertIn("A1 보도 지도상 없음 (1:1000) → 로드뷰 확인", result["check_reasons"])
+
+    def test_photo_disagreeing_with_map_needs_review(self):
+        from pudo.vision import SCHEMA_VERSION, parse_assessments
+        feature, data = candidate(), clear_map()
+        feature["properties"].update({"centerline": [CENTER_LON, CENTER_LAT], "heading": 0, "lanes_source": "default", "lanes": 1})
+        data.map1000 = self.map1000(total=4, sidewalk=False)
+        obs = {name: {"value": value, "confidence": 0.95, "evidence": "테스트"} for name, value in
+               (("sidewalk", True), ("curb_blocked", False), ("curb_line", "yellow_dashed"))}
+        row = {"candidate_id": "P0000", "coordinates": [CENTER_LON, CENTER_LAT], "heading": 0, "image_id": "x",
+               "image_source": "own", "model": "test", "observations": obs}
+        photos = parse_assessments({"schema_version": SCHEMA_VERSION, "results": [row]})
+        result = judge(feature, data, photos=photos)["properties"]
+        self.assertEqual(result["verdict"], "확인 필요")
+        self.assertIn("A1 보도 지도(1:1000 없음)와 사진 판독(있음) 불일치", result["check_reasons"])
 
 
 if __name__ == "__main__":

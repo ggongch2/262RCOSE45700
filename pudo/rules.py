@@ -54,7 +54,25 @@ def _checks(m, th):
 
     # ① 합법 — 어린이보호구역 (도로교통법 제32조 8호, 2021.10.21부터 주정차 금지). 구간 안은 항상 불가.
     zone = m["child_zone"]
-    if zone["mode"] == "tgis":
+    police = zone.get("police")
+    if police is not None and police["distance"] is not None:
+        # 경찰청 지정 경계가 있으면 그것으로 판정합니다. 후보 위치는 추정이라 경계 바로 밖은 확인 필요.
+        distance, label, near_th = police["distance"], police["label"], th["H6 경계 확인"]
+        tgis_in = zone["mode"] == "tgis" and zone["state"] == "in"
+        if distance == 0:
+            value, ok = f"지정 구역 안 ({label})", False
+            fails.append(f"H6 어린이보호구역 (경찰청 지정 구역 안, {label})")
+        elif distance <= near_th:
+            value, ok = f"지정 경계 {distance:.1f}m ({label})", None
+            needs.append(f"H6 어린이보호구역 경계 {distance:.0f}m ({label}) → 표지·사진 확인")
+        elif tgis_in:
+            value, ok = f"지정 구역 밖 {distance:.0f}m, 표지로는 구간 안 ({zone['label']})", None
+            needs.append("H6 표지로는 보호구역 안, 경찰청 경계 밖 → 표지·사진 확인")
+        else:
+            value, ok = f"지정 구역 밖 {distance:.0f}m", True
+        checks.append(dict(item="H6 어린이보호구역", value=value, threshold=f"경찰청 지정 구역 밖 (경계 {near_th}m 안은 확인)",
+                           **{"pass": ok}, estimated=ok is None))
+    elif zone["mode"] == "tgis":
         state, label = zone["state"], zone["label"]
         value = {"in": f"구간 안 ({label})", "near": f"{label}, 표지 근거 없음", "out": "구간 밖"}[state]
         checks.append(dict(item="H6 어린이보호구역", value=value, threshold="보호구역 구간 밖 (T-GIS 표지·노면표시로 추정)",
@@ -115,13 +133,31 @@ def _checks(m, th):
         curb = "unknown"; checks.append(dict(item="H5 규제선", value="두 자료 모두 규제선 없음" if hd_cov else "2021 자료에 규제선 없음 (정밀도로지도 미커버)", threshold="금지 구간 아님", **{"pass": True}, estimated=not hd_cov))
 
     # ② 물리 — 잔여 차로 / 통과 폭
-    lanes, oneway = m["lanes"]["value"], m["road"]["oneway"]
+    lanes, oneway, lane_source = m["lanes"]["value"], m["road"]["oneway"], m["lanes"]["source"]
     width, planned = m["width"]["value"], m["planned_road"]
+    map1000 = m.get("map1000") or {}
+    carriageway = map1000.get("carriageway_width")
+    if map1000.get("lanes_total") is not None:
+        # 1:1000 수치지형도 차로수는 양방향 합. 차선이 없는 도로는 1로 적혀 있어 양방향이면 편도 0(차선 없음)이 됩니다.
+        oneway = oneway or bool(map1000.get("oneway"))
+        per_direction = map1000["lanes_total"] if oneway else map1000["lanes_total"] // 2
+        # 1:1000이 넓게(편도 2 이상) 보는데 정밀도로지도가 좁게 보면 확인. 반대는 1:1000을 따름 (더 보수적이고,
+        # 정밀도로지도 차로 수는 후보 15m 안 링크의 최댓값이라 골목에서 옆 큰길 차로를 잡는 경우가 많음).
+        if lane_source == "정밀도로지도" and per_direction >= 2 and lanes < 2:
+            needs.append(f"P1 차로 수 자료 불일치 (1:1000 편도 {per_direction}, 정밀도로지도 편도 {lanes}) → 사진 확인")
+        lanes, lane_source = per_direction, "1:1000 수치지형도"
     if oneway or (lanes is not None and lanes >= 2):
-        checks.append(dict(item="P1 잔여 차로", value="일방통행" if oneway else f"편도 {lanes}차로 ({m['lanes']['source']})", threshold="편도 2차로 이상 또는 일방통행", **{"pass": True}, estimated=False))
+        checks.append(dict(item="P1 잔여 차로", value="일방통행" if oneway else f"편도 {lanes}차로 ({lane_source})", threshold="편도 2차로 이상 또는 일방통행", **{"pass": True}, estimated=False))
+    elif carriageway is not None:
+        # 차도 폭 = 1:1000 도로중심선 도로폭(보도 포함) - 양쪽 보도 폭
+        need = th["P1 통과폭"]; ok = carriageway >= need
+        value = f"차도 폭 {carriageway:.1f}m (1:1000 도로폭−보도폭), " + ("차선 없음" if lanes == 0 else f"편도 {lanes}차로")
+        checks.append(dict(item="P1 통과 폭", value=value, threshold=f"{need}m 이상", **{"pass": ok}, estimated=False))
+        if not ok:
+            fails.append(f"P1 통과 폭 부족 (차도 {carriageway:.1f}m, 1:1000, 양방향)")
     else:
         if lanes is None:
-            needs.append("P1 차로 수 모름 (정밀도로지도·OSM에 없음)")
+            needs.append("P1 차로 수 모름 (1:1000·정밀도로지도·OSM에 없음)")
         # 폭 근거: 지적도 도로 필지 폭(보도 포함 땅 폭)과 도시계획시설 도로 등급(법정 최소 폭).
         need = th["P1 통과폭"]; threshold = f"{need}m 이상"
         planned_ok = planned is not None and planned["min_width"] >= need
@@ -143,9 +179,14 @@ def _checks(m, th):
             checks.append(dict(item="P1 통과 폭", value=planned_text, threshold=threshold, **{"pass": None}, estimated=True)); needs.append("P1 도로 폭 없음 (단지 내 통로일 수 있음)")
 
     # ③ 승객 접근 — 보도. 자료가 없으면 모름 (사진 판독 결과가 있으면 아래에서 교체)
+    # 1:1000 보도 면은 지도 근거로만 씁니다. 확정은 사진(로드뷰)으로 합니다.
     sidewalk = m["sidewalk"]["value"]
-    checks.append(dict(item="A1 보도", value={True: "있음", False: "없음", None: "모름"}[sidewalk], threshold="보도 있음", **{"pass": sidewalk}, estimated=False))
+    on_map, map_width = map1000.get("sidewalk"), map1000.get("sidewalk_width")
+    map_text = None if on_map is None else ("지도상 있음" + (f" (폭 {map_width:.1f}m)" if map_width else "") if on_map else "지도상 없음")
+    value = {True: "있음", False: "없음", None: "모름"}[sidewalk] + (f" ({map_text}, 1:1000)" if sidewalk is None and map_text else "")
+    checks.append(dict(item="A1 보도", value=value, threshold="보도 있음", **{"pass": sidewalk}, estimated=False))
     if sidewalk is False: fails.append("A1 보도 없음")
+    elif sidewalk is None and map_text: needs.append(f"A1 보도 {map_text} (1:1000) → 로드뷰 확인")
     elif sidewalk is None: needs.append("A1 보도 유무 모름 (사진 필요)")
     return checks, fails, needs, curb
 
@@ -164,7 +205,8 @@ def evaluate(m, *, thresholds=None, rules_off=(), photo=None, photo_min_confiden
                "properties": {"id": m["id"], "heading": m["heading"]}}
     photo_report = None
     if photo is not None:
-        photo_report = apply_observations(photo, feature, m["image"], checks, fails, needs, min_confidence=photo_min_confidence)
+        photo_report = apply_observations(photo, feature, m["image"], checks, fails, needs, min_confidence=photo_min_confidence,
+                                          map_sidewalk=(m.get("map1000") or {}).get("sidewalk"))
     off = set(rules_off)
     fails = [reason for reason in fails if rule_code(reason) not in off]
     needs = [reason for reason in needs if rule_code(reason) not in off]

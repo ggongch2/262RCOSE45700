@@ -8,7 +8,7 @@
 [준비] data/ + sv_out/metadata.csv
        ↓ datasets.load_inputs → 후보 Feature 목록 + MapData (미터 좌표)
        ↓ measure.measure_all   ← 지리 계산은 여기서만. 기준값 미사용, 모르면 null
-       data/prepared/measurements.json (pudo-measure.v3) + data/prepared/layers.json
+       data/prepared/measurements.json (pudo-measure.v5) + data/prepared/layers.json
 [판정] 측정값 (+ 선택: --photo-results 사진 판독 JSON)
        ↓ rules.evaluate_all(thresholds=TH, rules_off=())   ← 파일·지리 계산 없음
        ↓ export.write_results
@@ -19,7 +19,7 @@
 
 ### 측정값 (`data/prepared/measurements.json`)
 
-`{schema_version: "pudo-measure.v3", generated_at, count, candidates: [...]}`. 후보 하나의 필드입니다. 거리는 m이며 null은 모름(자료 없음)입니다.
+`{schema_version: "pudo-measure.v5", generated_at, count, candidates: [...]}`. 후보 하나의 필드입니다. 거리는 m이며 null은 모름(자료 없음)입니다.
 
 | 필드 | 내용 |
 |---|---|
@@ -32,10 +32,11 @@
 | `sidewalk` | `{value, source}`. 현재 자료 없음 → null (사진 판독 결과가 판정에서 반영) |
 | `intersection` | `{inside, distance, estimated: true}`. 교차로 면 안 여부와 가장자리까지 거리 |
 | `crosswalk`, `bus_stop`, `hydrant` | 가장 가까운 시설까지 거리 |
-| `child_zone` | `{mode: "tgis", state: in/near/out, label}` 또는 `{mode: "radius", distance, label}` |
+| `child_zone` | `{mode: "tgis", state: in/near/out, label, police}` 또는 `{mode: "radius", distance, label, police}`. `police`는 `{distance, label}`(경찰청 지정 경계까지 거리, 안이면 0, 가장 가까운 구역의 시설 이름) 또는 null(경계 파일 없음). 판정은 `police`가 있으면 그것을 쓰고 T-GIS 값은 대조용 |
 | `safety_zone` | `{covered, distance}`. 정밀도로지도 안전지대 |
 | `reg_line` | `{tgis_no_stop, tgis_no_park, tgis_no_stop_2023, hd_covered, hd_no_stop, hd_bus, hd_no_park}`. 규제선까지 거리. `tgis_no_stop_2023`은 후보에서 가장 가까운 2021 서울시 금지선이 2023 서울시 차선 목록에도 있는지(true/false, 목록 파일이 없으면 null) |
 | `taxi_stand` | `{distance, label, estimated: true}` 또는 null(승차대 파일 없음). 같은 도로·같은 쪽(도로 중심선 기준 연석 쪽, 일방통행 차도는 차도 안 포함) 60m 안의 가장 가까운 서울시 택시승차대까지 **도로를 따라 잰 거리**. 없으면 `distance` null |
+| `map1000` | `{lanes_total, oneway, road_name, road_width, carriageway_width, curb_offset, sidewalk, sidewalk_width}` 또는 null(`data/map1000/` 없음). 1:1000 수치지형도. `lanes_total`은 같은 도로 중심선의 차로수(양방향 합), `carriageway_width`는 차도 폭(중심선 `도로폭` − 양쪽 보도 `폭`, 0 이하면 null), `road_width`는 중심선 `도로폭`(보도 포함), `curb_offset`은 중심선 점에서 차도 끝(연석)까지 거리, `sidewalk`는 연석 바깥 3m 안 보도 면 유무 |
 | `image` | `{pano_id}` 또는 null. 후보 ID와 조회 좌표가 맞는 Google 사진 |
 
 ## 원본 입력

@@ -148,7 +148,7 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(result["features"][0]["properties"]["image_id"], "test-pano")
             self.assertIsNone(result["features"][1]["properties"]["image_id"])
             prepared = json.loads((data / "prepared" / "measurements.json").read_text())
-            self.assertEqual(prepared["schema_version"], "pudo-measure.v3")
+            self.assertEqual(prepared["schema_version"], "pudo-measure.v5")
             self.assertEqual([m["id"] for m in prepared["candidates"]], [f["properties"]["id"] for f in generated])
             self.assertTrue((data / "prepared" / "layers.json").is_file())
             # 측정값은 입력이 바뀌었을 때만 다시 준비합니다.

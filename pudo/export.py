@@ -34,12 +34,19 @@ def overlay_layers(map_data):
     no_stop = [segment for code in ("010", "014", "015", "005", "017") for segment in map_data.lines.get(code, ())]
     layers = {
         "intersection": [{"type": "Feature", "geometry": _lonlat(part), "properties": {}} for part in parts(map_data.intersection_area)],
-        "child_zone": [{"type": "Feature", "geometry": _lonlat(part), "properties": {}} for part in parts(map_data.child_zone)],
+        # 경찰청 지정 경계가 있으면 그것을, 없으면 T-GIS 추정 구간을 그립니다.
+        "child_zone": ([{"type": "Feature", "geometry": _lonlat(area), "properties": {"label": name}} for area, name in map_data.police_zones]
+                       if map_data.police_zones is not None else
+                       [{"type": "Feature", "geometry": _lonlat(part), "properties": {}} for part in parts(map_data.child_zone)]),
         "child_zone_evidence": [{"type": "Feature", "geometry": _lonlat(Point(xy)), "properties": {"label": label}}
                                 for xy, label in map_data.child_zone_evidence],
         "crosswalk": points(map_data.crosswalks),
         "bus": points(map_data.buses),
         "hydrant": points(map_data.hydrants),
+        # 1:1000 수치지형도 보도 면 (판정 영역 + 100m). 로드뷰와 비교해 보는 근거
+        "sidewalk": [{"type": "Feature", "geometry": _lonlat(area), "properties": {"label": f"보도 폭 {width:.1f}m" if width else "보도"}}
+                     for area, width in (map_data.map1000.sidewalks if map_data.map1000 is not None else [])
+                     if area.distance(Point(0, 0)) <= RADIUS_M + 100],
         "taxi_stand": [{"type": "Feature", "geometry": _lonlat(Point(xy)), "properties": {"label": label}}
                        for xy, label in (map_data.taxi_stands or [])],
         "no_stop_line": [{"type": "Feature", "geometry": _lonlat(LineString(segment)), "properties": {}}

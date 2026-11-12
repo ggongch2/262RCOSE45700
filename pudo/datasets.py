@@ -42,6 +42,24 @@ class MapData:
     images: dict = field(default_factory=dict)
     taxi_stands: list = field(default_factory=list)      # [(좌표, 설명)] 서울시 택시승차대. None이면 자료 없음
     lines_2023: dict = None                              # {선 코드: [2023 목록에도 있는지]} lines와 같은 순서. None이면 2023 목록 없음
+    police_zones: list = None                            # [(면, 시설 이름)] 경찰청 어린이보호구역 지정 경계. None이면 자료 없음
+    map1000: object = None                               # Map1000 (1:1000 수치지형도 도로중심선·차도·보도). None이면 자료 없음
+
+
+@dataclass
+class Map1000:
+    """1:1000 수치지형도에서 판정에 쓰는 세 레이어 (미터 좌표)."""
+
+    lines: list          # [(선, 차로수 양방향 합, 일방통행 여부, 도로명, 도로폭 m)]  A0020000 도로중심선. 도로폭은 보도 포함
+    carriageway: object  # 도로경계 면(A0010000, 보도 포함) - 보도 면(A0033320) = 차도
+    sidewalks: list      # [(면, 폭 m 또는 None)]  A0033320 인도(보도)
+    line_tree: object = None
+    sidewalk_tree: object = None
+
+    def __post_init__(self):
+        from shapely.strtree import STRtree
+        self.line_tree = STRtree([geometry for geometry, *_ in self.lines])
+        self.sidewalk_tree = STRtree([geometry for geometry, _ in self.sidewalks])
 
 
 def read_json(path):
@@ -165,6 +183,75 @@ def _intersection_area(elements, half_widths):
             pieces += [a.intersection(b) for i, a in enumerate(local) for b in local[i + 1:] if a.intersects(b)]
     pieces = [piece for piece in pieces if not piece.is_empty and piece.area > 0]
     return unary_union(pieces) if pieces else None
+
+
+POLICE_ZONE_FILE = "child_zones_police.json"        # 경찰청_전국 보호구역 현황 API (pudo download)
+POLICE_CHILD_TYPE = "1"                             # fcltTypeCd 1: 어린이 (2 노인, 3 장애인은 제32조 8호 대상 아님)
+
+
+def _police_zones(path):
+    """[(미터 좌표 면, 시설 이름)] 경찰청 어린이보호구역 경계. 파일이 없으면 None.
+
+    WKT 좌표계는 EPSG:5181 (중부원점, 가산 500000). 도로를 따라 그린 면이며, 같이 들어 있는 점(시설 위치)은 쓰지 않습니다.
+    """
+    if not path.is_file():
+        return None
+    from pyproj import Transformer
+    from shapely import wkt
+    to_wgs84 = Transformer.from_crs(5181, 4326, always_xy=True)
+
+    def to_local(array):
+        lon, lat = to_wgs84.transform(array[:, 0], array[:, 1])
+        return np.array([to_meters(a, b) for a, b in zip(lon, lat)])
+
+    zones = []
+    for item in read_json(path)["items"]:
+        if item.get("fcltTypeCd") != POLICE_CHILD_TYPE or item.get("useYn") != "Y" or not item.get("fturGeomVl"):
+            continue
+        geometry = wkt.loads(item["fturGeomVl"])
+        polygons = [shapely.make_valid(part) for part in getattr(geometry, "geoms", [geometry]) if part.geom_type in ("Polygon", "MultiPolygon")]
+        if polygons:
+            zones.append((shapely.transform(shapely.union_all(polygons), to_local), item.get("trgtFcltNm") or "이름 없음"))
+    return zones
+
+
+MAP1000_DIR = "map1000"                             # 국토지리정보원 1:1000 수치지형도 v2.0 SHP, 도엽 폴더마다 세 레이어
+
+
+def _map1000(folder):
+    """data/map1000/<도엽>/의 도로중심선·도로경계·보도 → Map1000. 폴더가 없으면 None.
+
+    강남구·서초구 파일에 같은 도엽이 겹쳐 들어 있어 UFID로 중복을 뺍니다. 좌표계는 EPSG:5186.
+    """
+    if not folder.is_dir():
+        return None
+    import shapefile
+    from pyproj import Transformer
+    to_wgs84 = Transformer.from_crs(5186, 4326, always_xy=True)
+
+    def to_local(array):
+        lon, lat = to_wgs84.transform(array[:, 0], array[:, 1])
+        return np.array([to_meters(a, b) for a, b in zip(lon, lat)])
+
+    def read(name):
+        seen = {}
+        for sheet in sorted(path for path in folder.iterdir() if path.is_dir()):
+            if not (sheet / f"{name}.shp").is_file():
+                continue
+            reader = shapefile.Reader(str(sheet / name), encoding="cp949")
+            for item, record in zip(reader.iterShapes(), reader.iterRecords()):
+                if item.points and record["UFID"] not in seen:
+                    seen[record["UFID"]] = (shapely.transform(shapely.make_valid(shape(item.__geo_interface__)), to_local), record.as_dict())
+        return list(seen.values())
+
+    lines = [(geometry, record["차로수"], record["일방통행"] == "일방통행", record.get("도로명") or record.get("명칭") or "", record.get("도로폭") or None)
+             for geometry, record in read("N1L_A0020000")]
+    sidewalks = [(geometry, record["폭"] or None) for geometry, record in read("N1A_A0033320")]
+    road = shapely.union_all([geometry for geometry, _ in read("N1A_A0010000")])
+    if not lines or road.is_empty:
+        return None
+    carriageway = road.difference(shapely.union_all([geometry for geometry, _ in sidewalks])) if sidewalks else road
+    return Map1000(lines=lines, carriageway=carriageway, sidewalks=sidewalks)
 
 
 ZONE_API_FILE = "child_protection_zones.json"       # 전국어린이보호구역표준데이터 API (pudo download)
@@ -408,6 +495,8 @@ def load_map_data(data_dir, sv_dir):
         hd_link=_hd_lines(links, lambda p: True),
         images=_images(sv_dir / "metadata.csv"),
         taxi_stands=_taxi_stands(data_dir / TAXI_STAND_FILE),
+        police_zones=_police_zones(data_dir / POLICE_ZONE_FILE),
+        map1000=_map1000(data_dir / MAP1000_DIR),
         lines_2023=_confirm_2023(dict(lines), _lane_points_2023(data_dir / LANE_2023_FILE)),
     )
 
