@@ -144,7 +144,7 @@ def apply_observations(assessment, feature, image, checks, fails, needs, *, min_
         needs.append(f"V0 사진 대응 확인 필요: {mismatch}")
         return report
 
-    labels = {"sidewalk": "A1 보도", "curb_blocked": "A2 연석 연결", "curb_line": "V1 사진 규제선",
+    labels = {"sidewalk": "A1 보도", "curb_blocked": "A2 차도 끝 접근", "curb_line": "V1 사진 규제선",
               "construction": "V2 공사", "occupied": "V3 일시적 점유"}
     for name, observation in assessment.observations.items():
         item = labels[name]
@@ -172,7 +172,7 @@ def apply_observations(assessment, feature, image, checks, fails, needs, *, min_
         elif name == "curb_blocked":
             passed, display = not value, "막힘" if value else "연결됨"
             if value:
-                fails.append("A2 사진 판독: 연석 접근이 막힘")
+                fails.append("A2 사진 판독: 차도 끝에서 보도로 가는 길이 막힘")
         elif name == "curb_line":
             passed, display = value not in {"yellow_solid", "yellow_double"}, value
             if not passed:

@@ -25,18 +25,18 @@
 |---|---|
 | `id`, `coordinates`, `heading`, `side`, `centerline` | 후보 식별·위치 |
 | `road` | `{name, type, osm_way, oneway}` |
-| `position` | `{estimated: true, offset_m, basis}`. 연석 위치는 중심선에서 옮긴 추정값이며 `basis`는 옮긴 근거(정밀도로지도 차로 수 / OSM 차로 수 / 지적도 도로 폭 / 근거 없음) |
+| `position` | `{estimated, offset_m, basis}`. `offset_m`은 1:1000 중심선에서 후보까지 거리, `basis`는 차도 끝 근거(`1:1000 차도 끝` / `1:1000 도로폭/2 (...)`). 차도 면 끝을 찾은 경우만 `estimated: false` |
 | `lanes` | `{value, source}`. 정밀도로지도·OSM에 없으면 value null |
-| `width` | `{value, source}`. 지적도 도로 필지 폭(보도 포함) |
+| `width` | `{value, source}`. 1:1000 도로중심선 도로폭(보도 포함) |
 | `planned_road` | `{grade, min_width}` 또는 null. 도시계획시설 도로 등급 |
 | `sidewalk` | `{value, source}`. 현재 자료 없음 → null (사진 판독 결과가 판정에서 반영) |
 | `intersection` | `{inside, distance, estimated: true}`. 교차로 면 안 여부와 가장자리까지 거리 |
 | `crosswalk`, `bus_stop`, `hydrant` | 가장 가까운 시설까지 거리 |
 | `child_zone` | `{mode: "tgis", state: in/near/out, label, police}` 또는 `{mode: "radius", distance, label, police}`. `police`는 `{distance, label}`(경찰청 지정 경계까지 거리, 안이면 0, 가장 가까운 구역의 시설 이름) 또는 null(경계 파일 없음). 판정은 `police`가 있으면 그것을 쓰고 T-GIS 값은 대조용 |
-| `safety_zone` | `{covered, distance}`. 정밀도로지도 안전지대 |
+| `safety_zone` | `{covered, distance, source}`. 정밀도로지도 노면선 531과 1:1000 안전지대 면 중 가까운 것까지 거리. `covered`는 둘 중 하나라도 덮는지, `source`는 `정밀도로지도` / `1:1000` |
 | `reg_line` | `{tgis_no_stop, tgis_no_park, tgis_no_stop_2023, hd_covered, hd_no_stop, hd_bus, hd_no_park}`. 규제선까지 거리. `tgis_no_stop_2023`은 후보에서 가장 가까운 2021 서울시 금지선이 2023 서울시 차선 목록에도 있는지(true/false, 목록 파일이 없으면 null) |
-| `taxi_stand` | `{distance, label, estimated: true}` 또는 null(승차대 파일 없음). 같은 도로·같은 쪽(도로 중심선 기준 연석 쪽, 일방통행 차도는 차도 안 포함) 60m 안의 가장 가까운 서울시 택시승차대까지 **도로를 따라 잰 거리**. 없으면 `distance` null |
-| `map1000` | `{lanes_total, oneway, road_name, road_width, carriageway_width, curb_offset, sidewalk, sidewalk_width}` 또는 null(`data/map1000/` 없음). 1:1000 수치지형도. `lanes_total`은 같은 도로 중심선의 차로수(양방향 합), `carriageway_width`는 차도 폭(중심선 `도로폭` − 양쪽 보도 `폭`, 0 이하면 null), `road_width`는 중심선 `도로폭`(보도 포함), `curb_offset`은 중심선 점에서 차도 끝(연석)까지 거리, `sidewalk`는 연석 바깥 3m 안 보도 면 유무 |
+| `taxi_stand` | `{distance, label, estimated: true}` 또는 null(승차대 파일 없음). 같은 도로·같은 쪽(도로 중심선 기준 차도 끝 쪽, 일방통행 차도는 차도 안 포함) 60m 안의 가장 가까운 서울시 택시승차대까지 **도로를 따라 잰 거리**. 없으면 `distance` null |
+| `map1000` | `{lanes_total, oneway, road_name, road_width, carriageway_width, curb_offset, sidewalk, sidewalk_width}` 또는 null(`data/map1000/` 없음). 1:1000 수치지형도. `lanes_total`은 같은 도로 중심선의 차로수(양방향 합), `carriageway_width`는 차도 폭(중심선 `도로폭` − 양쪽 보도 `폭`, 0 이하면 null), `road_width`는 중심선 `도로폭`(보도 포함), `curb_offset`은 중심선 점에서 차도 끝까지 거리, `sidewalk`는 차도 끝 바깥 3m 안 보도 면 유무 |
 | `image` | `{pano_id}` 또는 null. 후보 ID와 조회 좌표가 맞는 Google 사진 |
 
 ## 원본 입력
@@ -45,11 +45,10 @@
 |---|---|---|
 | `osm_roads_gangnam.json` | Overpass JSON의 `elements[]`: way, tags, nodes, geometry | 후보 생성, 교차로 계산 |
 | `layers_gangnam.json` | 레이어 이름 → GeoJSON FeatureCollection | 시설 거리, 학교 반경(T-GIS가 없을 때), 서울시 규제선 |
-| `hdmap/lt_l_a2link.geojson` | 선 GeoJSON, `properties.laneno` | 후보 생성, 정밀도로지도 커버리지 |
+| `hdmap/lt_l_a2link.geojson` | 선 GeoJSON, `properties.laneno` | 정밀도로지도가 덮는 곳인지 (H5·H7) |
 | `hdmap/lt_l_b2surfacelinemark.geojson` | 선 GeoJSON, `properties.kind/type` | 규제선·버스차로·안전지대 |
 | `tgis/A064_P_signs.geojson` | 점 GeoJSON, T-GIS 안전표지 원본 속성(`MRK_NUM`, `RMK` 등) | 어린이보호구역 근거·경계 |
 | `tgis/A054_P_text_marks.geojson` | 점 GeoJSON, T-GIS 노면 문자표시 원본 속성(`CTT` 등) | 어린이보호구역 근거 |
-| `vworld_road_parcels_gangnam.geojson` | 도로 필지 MultiPolygon GeoJSON | 도로 폭 추정 |
 | `vworld_upis_roads_gangnam.geojson` | 도시계획시설 도로 면, `properties.grad_se`(광로·대로·중로·소로), `road_ty`(1~3류) | P1 폭 근거 (선택) |
 | `child_protection_zones.json` | `{items: [...]}`, 전국어린이보호구역표준데이터 API 행(`trgetFcltyNm`, `fcltyKnd`, `latitude`, `longitude`) | 보호구역 지정 시설 (선택) |
 
@@ -57,7 +56,7 @@
 
 H6 어린이보호구역은 세 단계 근거를 씁니다. T-GIS 표지·노면 문자로 복원한 구간 안이면 보호구역 안(항상 불가)입니다. 지정 시설 목록(`child_protection_zones.json`, 없으면 `child_protection_zones.csv`)이 있으면 시설 좌표를 70m 안의 가장 가까운 도로에 붙여 150m까지 퍼진 도로를 따로 만들고, 그 안의 후보는 확인 필요로 둡니다. 정문 위치와 지정 범위를 몰라 간선도로까지 번질 수 있기 때문입니다. T-GIS 파일이 없으면 대상시설 반경 300m 규칙으로 돌아갑니다.
 
-P1 통과 폭(편도 1차로 양방향 도로)은 지적도 도로 필지 폭과 도시계획시설 도로 등급의 법정 최소 폭(「도시·군계획시설의 결정·구조 및 설치기준에 관한 규칙」 제9조)을 함께 봅니다. 등급은 도로 중심점과 진행 방향 앞뒤 10m가 모두 같은 면 안에 있을 때만 그 도로의 것으로 봅니다. 지적도 폭이 없으면 등급 하한으로 채우고, 지적도 폭은 기준 미달인데 등급 하한은 기준 이상이면 불가 대신 자료 불일치(확인 필요)로 둡니다. 소로 3류(8m 미만)는 하한이 없어 폭 근거로 쓰지 않습니다. 판정 출력의 `map.planned_road`에 등급명을 남깁니다.
+P1은 **통과 폭을 먼저** 봅니다. 1:1000 차도 폭(도로폭 − 양쪽 보도 폭)이 있으면 일방통행 5.5m(서 있는 차 2.5 + 한 방향 3.0), 양방통행 8.5m(+ 양방향 각 3.0) 이상이어야 통과입니다. 차도 폭을 모를 때만 편도 2차로 이상·일방통행이면 통과로 보고, 그 밖에는 1:1000 도로폭(보도 포함)과 도시계획시설 도로 등급의 법정 최소 폭(「도시·군계획시설의 결정·구조 및 설치기준에 관한 규칙」 제9조)을 함께 봅니다. 등급은 도로 중심점과 진행 방향 앞뒤 10m가 모두 같은 면 안에 있을 때만 그 도로의 것으로 봅니다. 도로폭이 없으면 등급 하한으로 채우고, 도로폭은 기준 미달인데 등급 하한은 기준 이상이면 불가 대신 자료 불일치(확인 필요)로 둡니다. 소로 3류(8m 미만)는 하한이 없어 폭 근거로 쓰지 않습니다. 판정 출력의 `map.planned_road`에 등급명을 남깁니다.
 
 H1은 교차로 면까지의 거리로 판정합니다(면 안이면 제32조 1호 불가, 가장자리 5m 이내면 2호 불가). 교차로 면은 각 way를 차도 반폭(후보 생성 때의 가장자리 이동 거리 + 1.5m 중앙값)만큼 넓힌 뒤 같은 이름의 도로를 하나로 합치고(상하행 사이 20m까지 메움), 교차 노드 40m 안에서 서로 다른 도로가 겹치는 부분입니다. 교차 노드는 OSM 차도에서 두 개 이상의 서로 다른 way가 공유하는 노드입니다. 닫힌 way의 시작·끝 노드와, 두 way의 끝이 `CONTINUATION_TURN_DEG`(20°) 미만으로 꺾이며 이어지는 분할 지점은 제외합니다. 다른 길과 직각에 가깝게 이어지는 끝점은 도로 모퉁이로 보고 유지합니다.
 
@@ -69,13 +68,15 @@ H1은 교차로 면까지의 거리로 판정합니다(면 안이면 제32조 1�
 |---|---|---|
 | `id` | string | 해당 후보 집합 내 식별자 |
 | `heading` | number | 우측 도로변을 바라보는 방위각, 도 단위 |
-| `side` | `R` / `L` | OSM 선의 정방향 / 역방향에서 생성한 쪽 |
+| `side` | `R` / `L` | 중심선(1:1000, 없으면 OSM)의 정방향 / 역방향 쪽 |
 | `road_type`, `name` | string | 도로 유형과 이름 |
-| `osm_way` | integer | OSM way ID |
+| `osm_way` | integer / null | OSM way ID (1:1000 방식은 같은 방향으로 가장 가까운 OSM 길, 교차로 면 계산용) |
 | `oneway` | boolean | 일방통행 여부 |
-| `lanes` | integer | 후보 생성에 사용한 차로 수 |
-| `lanes_source` | `hdmap` / `osm` / `default` | 차로 수의 출처 |
-| `road_width_m` | number / null | 지적도 기반 도로 폭, m |
+| `lanes` | integer | 편도 차로 수 (1:1000은 차로수 ÷ 2, 일방은 그대로) |
+| `lanes_source` | `map1000` | 차로 수의 출처 |
+| `road_width_m` | number / null | 1:1000 도로폭(보도 포함), m |
+| `road_width_source` | string | `road_width_m`의 출처 (1:1000 방식만) |
+| `position_source` | string | 차도 끝 위치 근거: `1:1000 차도 끝` 또는 `1:1000 도로폭/2 (...)` (1:1000 방식만) |
 | `curb_offset_m` | number | 중심선에서 후보까지 이동 거리, m |
 | `centerline` | `[lon, lat]` | 이동 전 도로 중심선 위치 |
 
@@ -113,7 +114,7 @@ H1은 교차로 면까지의 거리로 판정합니다(면 안이면 제32조 1�
 | 관측값 | checks 항목 | 반영 |
 |---|---|---|
 | `sidewalk` | A1 보도 | 도로 유형 추정값을 대체. 보도 없음이면 불가 |
-| `curb_blocked` | A2 연석 연결 | 막힘이면 불가 |
+| `curb_blocked` | A2 차도 끝 접근 | 막힘이면 불가 |
 | `curb_line` | V1 사진 규제선 | 황색 실선·복선이면 불가. 그 외 값이면 지도 규제선 자료 불일치를 해소. 단 버스전용차로 확인 사유는 유지 |
 | `construction`, `occupied` | V2 공사, V3 일시적 점유 | 있음이면 확인 필요 |
 

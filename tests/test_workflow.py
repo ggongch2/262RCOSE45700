@@ -14,6 +14,7 @@ from pudo.datasets import load_map_data
 from pudo.export import write_results
 from pudo.geo import to_lonlat
 from pudo.vision import PhotoContractError, SCHEMA_VERSION
+from support import write_map1000
 
 
 def feature(geometry_type, coordinates, **properties):
@@ -62,12 +63,10 @@ def write_fixture(root):
         "hdmap/lt_l_b2surfacelinemark.geojson": collection(
             feature("LineString", regulation, kind="515", type="111")
         ),
-        "vworld_road_parcels_gangnam.geojson": collection(feature("MultiPolygon", [[[
-            to_lonlat(x, y) for x, y in [(-150, -150), (150, -150), (150, 150), (-150, 150), (-150, -150)]
-        ]]])),
     }
     for name, value in inputs.items():
         (data / name).write_text(json.dumps(value, ensure_ascii=False))
+    write_map1000(data / "map1000", reach=120)    # OSM 두 길과 같은 자리의 1:1000 도로
     return data, web
 
 
@@ -90,7 +89,7 @@ class WorkflowTests(unittest.TestCase):
             photo_path.write_text(json.dumps({"schema_version": SCHEMA_VERSION, "results": [row]}))
             result = pipeline.run_pipeline(data_dir=data, web_dir=web, sv_dir=root / "sv_out", photo_results=photo_path)
             properties = result["features"][0]["properties"]
-            self.assertIn("A2 사진 판독: 연석 접근이 막힘", properties["fail_reasons"])
+            self.assertIn("A2 사진 판독: 차도 끝에서 보도로 가는 길이 막힘", properties["fail_reasons"])
             self.assertEqual(properties["vision"]["model"], "test-fixture-no-model")
             self.assertEqual(json.loads((data / "pudo_v0.geojson").read_text()), result)
             self.assertNotIn("vision", result["features"][1]["properties"])
@@ -101,22 +100,6 @@ class WorkflowTests(unittest.TestCase):
             with self.assertRaises(PhotoContractError):
                 pipeline.run_pipeline(data_dir=data, web_dir=web, sv_dir=root / "sv_out", photo_results=photo_path)
             self.assertEqual((data / "pudo_v0.geojson").read_bytes(), before)
-
-    def test_invalid_parcel_geometry_is_repaired_without_changing_source(self):
-        with tempfile.TemporaryDirectory() as temp, contextlib.redirect_stdout(io.StringIO()):
-            root = Path(temp)
-            data, _ = write_fixture(root)
-            path = data / "vworld_road_parcels_gangnam.geojson"
-            # 교차하는 외곽선: 공급자 데이터에서 발견되는 유효하지 않은 폴리곤을 재현합니다.
-            invalid = collection(feature("MultiPolygon", [[[
-                to_lonlat(x, y) for x, y in [(-150, -150), (150, 150), (-150, 150), (150, -150), (-150, -150)]
-            ]]]))
-            path.write_text(json.dumps(invalid))
-            original = path.read_bytes()
-            with patch.object(candidates, "DATA_DIR", data):
-                candidates.main([])
-            self.assertEqual(path.read_bytes(), original)
-            self.assertGreater(len(json.loads((data / "candidates_v1.geojson").read_text())["features"]), 0)
 
     def test_candidates_to_pipeline_outputs_and_modes(self):
         with tempfile.TemporaryDirectory() as temp, contextlib.redirect_stdout(io.StringIO()):

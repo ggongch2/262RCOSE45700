@@ -21,20 +21,6 @@ def parcel_page(total, *features):
 
 
 class DownloadTests(unittest.TestCase):
-    def test_parcels_collect_all_pages_before_road_filter(self):
-        responses = [parcel_page(3, point("a", "1도"), point("b")), parcel_page(3, point("c", "2도"))]
-        with patch.object(download, "request_json", side_effect=responses) as fetch:
-            result = download.fetch_parcels("test-key", [127, 37, 128, 38])
-        self.assertEqual([f["id"] for f in result["features"]], ["a", "c"])
-        self.assertEqual(result["pudo_source"], {"all_parcels": 3, "road_parcels": 2, "pages": 2})
-        self.assertEqual([call.args[1]["page"] for call in fetch.call_args_list], [1, 2])
-
-    def test_repeated_parcel_page_fails_instead_of_silently_truncating(self):
-        response = parcel_page(3, point("a", "1도"))
-        with patch.object(download, "request_json", return_value=response):
-            with self.assertRaisesRegex(download.DownloadError, "중복"):
-                download.fetch_parcels("test-key", [127, 37, 128, 38])
-
     def test_wfs_splits_truncated_response_and_deduplicates(self):
         def response(total, *ids):
             return {**download.collection([point(id) for id in ids]), "numberMatched": total}

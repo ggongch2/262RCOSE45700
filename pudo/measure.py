@@ -26,9 +26,9 @@ LAYER_FILE = "layers.json"
 HD_COVER_M = 15                       # 후보에서 이 거리 안에 정밀도로지도 차로링크가 있으면 그 도로를 덮는 것으로 봄
 NO_STOP = ("010", "014", "015", "005", "017")   # T-GIS 규제차선 코드: 주정차금지
 NO_PARK = ("009",)                              # T-GIS 규제차선 코드: 주차금지 (정차 가능)
-LANE_SOURCE = {"hdmap": "정밀도로지도", "osm": "OSM"}
+LANE_SOURCE = {"map1000": "1:1000 수치지형도"}
 TAXI_SEARCH_M = 60                    # 이 직선거리 안의 택시승차대만 봄 (같은 도로 앞뒤)
-TAXI_SIDEWALK_M = 15                  # 승차대 좌표가 연석에서 바깥(보도·건물 쪽)으로 이만큼까지는 같은 도로로 봄
+TAXI_SIDEWALK_M = 15                  # 승차대 좌표가 차도 끝에서 바깥(보도·건물 쪽)으로 이만큼까지는 같은 도로로 봄
 
 
 def _round(value):
@@ -38,12 +38,15 @@ def _round(value):
 
 MAP1000_LINE_M = 12                   # 후보 중심선 점에서 이 거리 안의 1:1000 도로중심선만 같은 도로로 봄
 MAP1000_ANGLE_DEG = 30                # 도로 방향 차이가 이보다 크면 교차 도로로 보고 제외
-MAP1000_RAY_M = 40                    # 연석(차도 끝)을 찾을 때 중심선 점에서 양쪽으로 뻗는 길이. 끝까지 차도면 교차로 안이라 모름
-MAP1000_SIDEWALK_M = 3                # 연석(차도 끝) 바깥 이 거리 안에 보도 면이 있으면 보도 있음
+MAP1000_RAY_M = 40                    # 차도 끝을 찾을 때 중심선 점에서 양쪽으로 뻗는 길이. 끝까지 차도면 교차로 안이라 모름
+MAP1000_SIDEWALK_M = 3                # 차도 끝 바깥 이 거리 안에 보도 면이 있으면 보도 있음
+DIRECTION_LOOK_M = 2                  # 도로선 위 한 점의 진행 방향을 잴 때 앞뒤로 보는 거리
+ON_CARRIAGEWAY_M = 1.5                # 중심선 점에서 이 거리 안에 걸친 차도 조각을 '이 도로의 차도'로 봄
+RAY_END_TOLERANCE_M = 0.5             # 가로선 끝까지 차도면(길이가 2 x MAP1000_RAY_M - 이 값 이상) 교차로 안으로 봄
 
 
 def _map1000(pr, data):
-    """1:1000 수치지형도: 같은 도로의 차로수(양방향 합)·일방통행, 차도 폭(도로폭 - 양쪽 보도 폭), 연석 바깥 보도.
+    """1:1000 수치지형도: 같은 도로의 차로수(양방향 합)·일방통행, 차도 폭(도로폭 - 양쪽 보도 폭), 차도 끝 바깥 보도.
 
     None = 자료 없음. 값마다 None = 그 항목을 잴 수 없음(같은 방향 중심선 없음, 교차로 안 등).
     """
@@ -52,13 +55,13 @@ def _map1000(pr, data):
         return None
     from shapely.geometry import LineString, Point
     center = Point(to_meters(*pr["centerline"]))
-    heading = math.radians(pr["heading"])                 # 중심선에서 연석 쪽
+    heading = math.radians(pr["heading"])                 # 중심선에서 차도 끝 쪽
     dx, dy = math.sin(heading), math.cos(heading)
     road_dir = (pr["heading"] + 90) % 180
 
     def direction(line):
         at = line.project(center)
-        a, b = line.interpolate(max(0.0, at - 2)), line.interpolate(min(line.length, at + 2))
+        a, b = line.interpolate(max(0.0, at - DIRECTION_LOOK_M)), line.interpolate(min(line.length, at + DIRECTION_LOOK_M))
         return math.degrees(math.atan2(b.x - a.x, b.y - a.y)) % 180
 
     match = None
@@ -72,9 +75,9 @@ def _map1000(pr, data):
     ray = LineString([(center.x - dx * MAP1000_RAY_M, center.y - dy * MAP1000_RAY_M),
                       (center.x + dx * MAP1000_RAY_M, center.y + dy * MAP1000_RAY_M)])
     cut = ray.intersection(source.carriageway)
-    pieces = [piece for piece in getattr(cut, "geoms", [cut]) if piece.geom_type == "LineString" and piece.distance(center) < 1.5]
+    pieces = [piece for piece in getattr(cut, "geoms", [cut]) if piece.geom_type == "LineString" and piece.distance(center) < ON_CARRIAGEWAY_M]
     curb = None
-    if pieces and pieces[0].length < 2 * MAP1000_RAY_M - 0.5:
+    if pieces and pieces[0].length < 2 * MAP1000_RAY_M - RAY_END_TOLERANCE_M:
         curb = max((x - center.x) * dx + (y - center.y) * dy for x, y in pieces[0].coords)
 
     sidewalk = sidewalk_width = None
@@ -84,22 +87,32 @@ def _map1000(pr, data):
         widths = [source.sidewalks[i][1] for i in source.sidewalk_tree.query(probe) if source.sidewalks[i][0].intersects(probe)]
         sidewalk = bool(widths)
         sidewalk_width = max((w for w in widths if w), default=None)
-    # 차도 폭: 도로중심선 도로폭(보도 포함) - 양쪽 보도 폭. 가로선이 지나는 보도 면 중 도로 안쪽 것만, 쪽마다 최댓값
-    attr_width = None
-    if match and match[4]:
-        half = match[4] / 2 + 2
-        sides = {1: 0.0, -1: 0.0}
-        for index in source.sidewalk_tree.query(ray):
-            area, walk_width = source.sidewalks[index]
-            if walk_width and area.intersects(ray) and area.distance(center) <= half:
-                side = 1 if (area.centroid.x - center.x) * dx + (area.centroid.y - center.y) * dy > 0 else -1
-                sides[side] = max(sides[side], walk_width)
-        attr_width = match[4] - sides[1] - sides[-1]
-        attr_width = attr_width if attr_width > 0 else None    # 보도 폭이 도로폭보다 크면 적힌 값이 맞지 않아 모름
+    # 차도 폭: 도로중심선 도로폭(보도 포함) - 양쪽 보도 폭
+    attr_width = source.carriageway_width(center, pr["heading"], match[4]) if match else None
     return {"lanes_total": match[1] if match else None, "oneway": match[2] if match else None, "road_name": match[3] if match else None,
             "road_width": _round(match[4]) if match else None,
             "carriageway_width": _round(attr_width),
             "curb_offset": _round(curb), "sidewalk": sidewalk, "sidewalk_width": _round(sidewalk_width)}
+
+
+def _safety_zone(p, data, hd_covered):
+    """안전지대까지 거리: 정밀도로지도 노면선 531(덮는 곳만)과 1:1000 안전지대 면(교통섬·도색) 중 가까운 것.
+
+    covered = 둘 중 하나라도 그 지점을 덮음. distance None = 덮는데 안전지대 없음.
+    """
+    found = []
+    if data.hd_safe and hd_covered:
+        d = distance_to_segments(p, data.hd_safe)
+        if d is not None:
+            found.append((d, "정밀도로지도"))
+    map1000 = data.map1000
+    if map1000 is not None and map1000.safety:
+        from shapely.geometry import Point
+        point = Point(p)
+        found.append((min(area.distance(point) for area, _ in map1000.safety), "1:1000"))
+    covered = bool(data.hd_safe and hd_covered) or map1000 is not None
+    distance, source = min(found, default=(None, None))
+    return {"covered": covered, "distance": _round(distance), "source": source}
 
 
 def _police_zone(p, data):
@@ -160,13 +173,13 @@ def _taxi_stand(pr, p, data):
     """같은 도로·같은 쪽에 있는 가장 가까운 택시승차대까지 도로를 따라 잰 거리.
 
     승차대 목록은 시설물 점 하나만 있고 정차 구간(시작·끝)은 없습니다. 길 건너편 승차대를 빼려고
-    도로 중심선 기준으로 후보와 같은 쪽(연석 쪽)에 있는 승차대만 보고, 진행 방향 성분만 거리로 씁니다.
-    승차대 좌표가 차도 안에 찍힌 경우가 있어 중심선과 연석 사이도 같은 쪽으로 봅니다.
-    일방통행 차도(중앙분리대로 나뉜 대로의 한쪽 포함)는 연석이 오른쪽 하나뿐이라 차도 안 전체를 같은 쪽으로 봅니다.
+    도로 중심선 기준으로 후보와 같은 쪽(차도 끝 쪽)에 있는 승차대만 보고, 진행 방향 성분만 거리로 씁니다.
+    승차대 좌표가 차도 안에 찍힌 경우가 있어 중심선과 차도 끝 사이도 같은 쪽으로 봅니다.
+    일방통행 차도(중앙분리대로 나뉜 대로의 한쪽 포함)는 차도 끝이 오른쪽 하나뿐이라 차도 안 전체를 같은 쪽으로 봅니다.
     """
     if data.taxi_stands is None:
         return None
-    heading = math.radians(pr.get("heading", 0))          # 중심선 → 연석 방향
+    heading = math.radians(pr.get("heading", 0))          # 중심선 → 차도 끝 방향
     nx, ny = math.sin(heading), math.cos(heading)
     tx, ty = -ny, nx                                       # 진행 방향
     offset = pr.get("curb_offset_m") or 0
@@ -196,7 +209,7 @@ def _planned_road(pr, p, data):
         return None
     from shapely.geometry import Point
     center = to_meters(*pr["centerline"]) if pr.get("centerline") else p
-    along = math.radians((pr.get("heading", 0) - 90) % 360)   # heading은 진행 방향 우측(연석 쪽)
+    along = math.radians((pr.get("heading", 0) - 90) % 360)   # heading은 진행 방향 우측(차도 끝 쪽)
     dx, dy = math.sin(along) * 10, math.cos(along) * 10
     probes = [Point(center), Point(center[0] + dx, center[1] + dy), Point(center[0] - dx, center[1] - dy)]
     for area, grade, min_width in data.planned_roads:
@@ -206,14 +219,8 @@ def _planned_road(pr, p, data):
 
 
 def _position_basis(pr):
-    """후보 위치(연석)를 중심선에서 옮긴 근거. candidates.py의 이동 거리 계산과 같은 순서입니다."""
-    lanes, width = pr.get("lanes"), pr.get("road_width_m")
-    oneway = str(pr.get("oneway", "no")).lower() in ("yes", "true", "1", "-1")
-    if lanes is not None:
-        half = lanes * 3.25 / 2 if oneway else max(lanes, 2) * 3.25 / 2
-        if width and width / 2 < half:
-            return "지적도 도로 폭"
-    return {"hdmap": "정밀도로지도 차로 수", "osm": "OSM 차로 수"}.get(pr.get("lanes_source"), "근거 없음 (도로 유형별 기본 차로 수)")
+    """후보 위치(차도 끝)를 정한 근거. candidates.py가 position_source에 남깁니다."""
+    return pr.get("position_source") or "근거 없음"
 
 
 def _image(pr, p, data):
@@ -240,10 +247,11 @@ def measure(feature, data):
         "side": pr.get("side"), "centerline": pr.get("centerline"),
         "road": {"name": pr.get("name", ""), "type": pr["road_type"], "osm_way": pr.get("osm_way"),
                  "oneway": str(pr.get("oneway", "no")).lower() in ("yes", "true", "1", "-1")},
-        # 연석 위치는 데이터에 없어 중심선에서 차도 반폭만큼 옮긴 추정 위치입니다.
-        "position": {"estimated": True, "offset_m": pr.get("curb_offset_m"), "basis": _position_basis(pr)},
+        # 차도 끝 위치는 데이터에 없어 중심선에서 차도 반폭만큼 옮긴 추정 위치입니다.
+        "position": {"estimated": not str(pr.get("position_source", "")).startswith("1:1000 차도 끝"), "offset_m": pr.get("curb_offset_m"), "basis": _position_basis(pr)},
         "lanes": {"value": pr["lanes"] if lanes_known else None, "source": LANE_SOURCE.get(pr.get("lanes_source"))},
-        "width": {"value": _round(pr.get("road_width_m")), "source": "지적도 도로 필지 (보도 포함)" if pr.get("road_width_m") is not None else None},
+        "width": {"value": _round(pr.get("road_width_m")),
+                  "source": pr.get("road_width_source") if pr.get("road_width_m") is not None else None},
         "planned_road": _planned_road(pr, p, data),
         "sidewalk": {"value": None, "source": None},      # 확정값 없음. 사진 판독 결과가 들어오면 판정에서 반영 (지도 근거는 map1000.sidewalk)
         # 1:1000 수치지형도. None = 자료 없음
@@ -254,8 +262,7 @@ def measure(feature, data):
         "bus_stop": _round(distance_to_points(p, data.buses)),
         "hydrant": _round(distance_to_points(p, data.hydrants)),
         "child_zone": _child_zone(pr, p, data),
-        "safety_zone": {"covered": bool(data.hd_safe) and hd_covered,
-                        "distance": _round(distance_to_segments(p, data.hd_safe)) if data.hd_safe and hd_covered else None},
+        "safety_zone": _safety_zone(p, data, hd_covered),
         "reg_line": {
             "tgis_no_stop": _round(distance_to_lines(p, data.lines, NO_STOP)),
             "tgis_no_park": _round(distance_to_lines(p, data.lines, NO_PARK)),
@@ -285,7 +292,8 @@ def _input_files(data_dir, sv_dir):
     names = ["candidates_v1.geojson", "layers_gangnam.json", "osm_roads_gangnam.json", "child_protection_zones.json",
              "child_protection_zones.csv", "vworld_upis_roads_gangnam.geojson", "hdmap/lt_l_a2link.geojson",
              "hdmap/lt_l_b2surfacelinemark.geojson", "tgis/A064_P_signs.geojson", "tgis/A054_P_text_marks.geojson",
-             "taxi_stands.xlsx", "tgis/lane_facilities_2023.xlsx", "child_zones_police.json"]
+             "taxi_stands.xlsx", "tgis/lane_facilities_2023.xlsx", "child_zones_police.json",
+             "vworld_moct_nodes_gangnam.geojson"]
     files = [data_dir / name for name in names] + [Path(sv_dir) / "metadata.csv"]
     # 압축을 풀면 shp는 원본 날짜(2025년)를 유지하므로 폴더 자체의 날짜도 봅니다.
     files += [data_dir / "map1000", *sorted((data_dir / "map1000").glob("*/*.shp"))] if (data_dir / "map1000").is_dir() else []
@@ -347,7 +355,7 @@ def summarize(measurements):
         basis[m["position"]["basis"]] = basis.get(m["position"]["basis"], 0) + 1
     print(f"후보 {total}개 측정")
     print("  모름·없음:", ", ".join(f"{name} {count}" for name, count in unknown.items()))
-    print("  후보 위치(연석) 추정 근거:", ", ".join(f"{name} {count}" for name, count in sorted(basis.items(), key=lambda x: -x[1])))
+    print("  후보 위치(차도 끝) 추정 근거:", ", ".join(f"{name} {count}" for name, count in sorted(basis.items(), key=lambda x: -x[1])))
 
 
 def main(argv=None):

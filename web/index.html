@@ -93,7 +93,7 @@ const REASONS = {H1:'H1 교차로', H2:'H2 횡단보도', H3:'H3 정류장', H4:
 const ROAD = {primary:'대로', primary_link:'대로 연결로', tertiary:'보조간선', residential:'이면도로', service:'골목·단지'};
 const $ = (id) => document.getElementById(id);
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const RULES = {H1:'교차로', H2:'횡단보도', H3:'정류장', H4:'소화전', H5:'규제선·전용차로', H6:'어린이보호구역', H7:'안전지대', H8:'택시승강장', P1:'통과 폭·차로', A1:'보도', A2:'연석 막힘(사진)', V0:'사진 대응'};
+const RULES = {H1:'교차로', H2:'횡단보도', H3:'정류장', H4:'소화전', H5:'규제선·전용차로', H6:'어린이보호구역', H7:'안전지대', H8:'택시승강장', P1:'통과 폭·차로', A1:'보도', A2:'차도 끝 접근 막힘(사진)', V0:'사진 대응'};
 const code = (reason) => String(reason).split(' ')[0];
 // 규칙 해제: 끈 규칙의 불가·확인 필요 사유를 빼고 같은 방식(불가 사유 → 불가, 확인 사유 → 확인 필요, 없으면 가능)으로 다시 판정합니다.
 let off = new Set();
@@ -280,7 +280,7 @@ function focusId(id) {
 
 function photoDetails(report) {
   if (!report) return '';
-  const labels = {sidewalk:'보도', curb_blocked:'연석 막힘', curb_line:'규제선', construction:'공사', occupied:'일시적 점유'};
+  const labels = {sidewalk:'보도', curb_blocked:'차도 끝 접근 막힘', curb_line:'규제선', construction:'공사', occupied:'일시적 점유'};
   const states = {applied:'반영됨', review:'확인 필요', rejected:'대응 불일치로 미반영'};
   const rows = Object.entries(report.observations).map(([name, o]) => `<tr><td>${esc(labels[name] || name)}</td><td>${esc(o.value === null ? '모름' : o.value === true ? '있음' : o.value === false ? '없음' : o.value)}</td><td>${o.confidence === null ? '미제공' : esc((o.confidence * 100).toFixed(0) + '%')}</td><td>${esc(o.evidence)}</td></tr>`).join('');
   return `<details><summary>사진 판독 정보 · ${esc(states[report.status] || report.status)}</summary><div class="muted">모델: ${esc(report.model)} · 사진: ${esc(report.image_source)} / ${esc(report.image_id)}</div><div class="muted">반영 항목: ${esc(report.used_fields.map(name => labels[name] || name).join(', ') || '없음')}</div><table class="chk"><tr><th>항목</th><th>관측값</th><th>제공 신뢰도</th><th>근거</th></tr>${rows}</table>${report.review_reasons.map(reason => `<div>${esc(reason)}</div>`).join('')}</details>`;

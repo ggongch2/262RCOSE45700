@@ -46,6 +46,11 @@ class MapData:
     map1000: object = None                               # Map1000 (1:1000 수치지형도 도로중심선·차도·보도). None이면 자료 없음
 
 
+SIDEWALK_SEARCH_MARGIN_M = 2   # 차도 폭 계산 때 '이 도로의 보도'로 보는 범위 = 중심선에서 도로폭/2 + 이 값.
+                               # 도로선이 한가운데서 조금 치우치거나 보도 면 경계가 도로폭과 어긋나도 이 도로의 보도를 놓치지 않으면서,
+                               # 건물 너머 다른 도로의 보도는 빼기 위한 측정 허용 오차 (판정 기준값 아님)
+
+
 @dataclass
 class Map1000:
     """1:1000 수치지형도에서 판정에 쓰는 세 레이어 (미터 좌표)."""
@@ -53,6 +58,7 @@ class Map1000:
     lines: list          # [(선, 차로수 양방향 합, 일방통행 여부, 도로명, 도로폭 m)]  A0020000 도로중심선. 도로폭은 보도 포함
     carriageway: object  # 도로경계 면(A0010000, 보도 포함) - 보도 면(A0033320) = 차도
     sidewalks: list      # [(면, 폭 m 또는 None)]  A0033320 인도(보도)
+    safety: list = field(default_factory=list)   # [(면, 구조)]  A0053326 안전지대 중 교통섬·평면(도색). 어린이보호구역 구조는 뺌
     line_tree: object = None
     sidewalk_tree: object = None
 
@@ -60,6 +66,24 @@ class Map1000:
         from shapely.strtree import STRtree
         self.line_tree = STRtree([geometry for geometry, *_ in self.lines])
         self.sidewalk_tree = STRtree([geometry for geometry, _ in self.sidewalks])
+
+    def carriageway_width(self, center, heading, road_width):
+        """차도 폭 = 도로폭(보도 포함) - 양쪽 보도 폭. center를 heading 방향으로 가로지르는 선에 걸리는 보도 면 중
+        도로 안쪽(도로폭/2 + SIDEWALK_SEARCH_MARGIN_M) 것만, 쪽마다 가장 넓은 폭을 뺍니다. 도로폭이 없거나 결과가 0 이하이면 None."""
+        if not road_width:
+            return None
+        from shapely.geometry import LineString
+        dx, dy = math.sin(math.radians(heading)), math.cos(math.radians(heading))
+        reach = road_width / 2 + SIDEWALK_SEARCH_MARGIN_M
+        ray = LineString([(center.x - dx * reach, center.y - dy * reach), (center.x + dx * reach, center.y + dy * reach)])
+        sides = {1: 0.0, -1: 0.0}
+        for index in self.sidewalk_tree.query(ray):
+            area, walk_width = self.sidewalks[index]
+            if walk_width and area.intersects(ray) and area.distance(center) <= reach:
+                side = 1 if (area.centroid.x - center.x) * dx + (area.centroid.y - center.y) * dy > 0 else -1
+                sides[side] = max(sides[side], walk_width)
+        width = road_width - sides[1] - sides[-1]
+        return width if width > 0 else None
 
 
 def read_json(path):
@@ -81,108 +105,6 @@ def _hd_lines(features, keep):
             coordinates = [point for part in coordinates for point in part]
         lines.append([to_meters(*point[:2]) for point in coordinates])
     return lines
-
-
-def _direction(points, index):
-    """노드에서 길을 따라 나가는 방향. 같은 좌표가 반복되면 다음 점을 사용합니다."""
-    step = 1 if index == 0 else -1
-    x, y = points[index]
-    for other in points[index + step::step]:
-        if other != (x, y):
-            return other[0] - x, other[1] - y
-    return None
-
-
-def _is_straight_continuation(entries):
-    """서로 다른 두 길의 끝이 거의 직선으로 이어지는 분할 지점인지."""
-    if len(entries) != 2 or any(index not in (0, len(points) - 1) for _, index, points in entries):
-        return False
-    (_, first_index, first_points), (_, second_index, second_points) = entries
-    first, second = _direction(first_points, first_index), _direction(second_points, second_index)
-    if first is None or second is None:
-        return False
-    cosine = (first[0] * second[0] + first[1] * second[1]) / (math.hypot(*first) * math.hypot(*second))
-    turn = 180 - math.degrees(math.acos(max(-1.0, min(1.0, cosine))))
-    return turn < CONTINUATION_TURN_DEG
-
-
-def _intersections(elements):
-    """차량 교차로·도로 모퉁이 노드. 닫힌 길의 시작점과 같은 길의 직선 분할 지점은 제외합니다."""
-    entries, positions = defaultdict(list), {}
-    for way in (element for element in elements if element["type"] == "way"):
-        points = [to_meters(point["lon"], point["lat"]) for point in way["geometry"]]
-        for index, (node, position) in enumerate(zip(way["nodes"], points)):
-            entries[node].append((way["id"], index, points))
-            positions[node] = position
-    return [
-        positions[node] for node, node_entries in entries.items()
-        if len({way_id for way_id, _, _ in node_entries}) >= 2 and not _is_straight_continuation(node_entries)
-    ]
-
-
-INTERSECTION_REACH_M = 40   # 교차 노드에서 이 반경 안의 도로 겹침만 교차로 면으로 봄
-MEDIAN_FILL_M = 10          # 같은 이름의 상하행 차도 사이(중앙분리대) 20m까지 한 도로로 메움
-HALF_WIDTH_DEFAULT = {"primary": 6.5, "primary_link": 3.25, "secondary": 4.9, "tertiary": 3.25}
-
-
-def _half_widths(candidates_path):
-    """길별 차도 반폭. 후보 생성 때 쓴 값(가장자리 이동 거리 + 1.5m)의 중앙값."""
-    if not Path(candidates_path).is_file():
-        return {}
-    offsets = defaultdict(list)
-    for feature in read_json(candidates_path)["features"]:
-        properties = feature["properties"]
-        if properties.get("osm_way") is not None and properties.get("curb_offset_m") is not None:
-            offsets[properties["osm_way"]].append(properties["curb_offset_m"])
-    return {way: sorted(values)[len(values) // 2] + 1.5 for way, values in offsets.items()}
-
-
-def _intersection_area(elements, half_widths):
-    """차도 면이 겹치는 교차로 면 (도로교통법 제32조 1·2호의 '교차로'와 '가장자리' 판정용).
-
-    길마다 차도 반폭만큼 면을 만들고, 이름이 같은 길(상하행 분리 차도 포함)을 한 도로로 합친 뒤
-    교차 노드 주변에서 서로 다른 도로가 겹치는 부분을 교차로 면으로 봅니다.
-    이름이 같은 길끼리 꺾이는 모퉁이는 두 길의 면이 겹치는 부분을 씁니다.
-    """
-    from shapely.geometry import LineString, Point
-    from shapely.ops import unary_union
-
-    ways = [element for element in elements if element["type"] == "way" and len(element["geometry"]) >= 2]
-    if not ways:
-        return None
-    road = {way["id"]: way.get("tags", {}).get("name") or f"way{way['id']}" for way in ways}
-    shapes, by_road, entries, positions = {}, defaultdict(list), defaultdict(list), {}
-    for way in ways:
-        points = [to_meters(point["lon"], point["lat"]) for point in way["geometry"]]
-        half = half_widths.get(way["id"], HALF_WIDTH_DEFAULT.get(way.get("tags", {}).get("highway"), 3.25))
-        shapes[way["id"]] = (LineString(points), half)
-        by_road[road[way["id"]]].append(LineString(points).buffer(half, cap_style=2))
-        for index, (node, position) in enumerate(zip(way["nodes"], points)):
-            entries[node].append((way["id"], index, points))
-            positions[node] = position
-    corridors = {
-        name: unary_union(parts).buffer(MEDIAN_FILL_M, join_style=2).buffer(-MEDIAN_FILL_M, join_style=2)
-        for name, parts in by_road.items()
-    }
-    pieces = []
-    for node, node_entries in entries.items():
-        way_ids = sorted({way_id for way_id, _, _ in node_entries})
-        if len(way_ids) < 2 or _is_straight_continuation(node_entries):
-            continue
-        center = Point(positions[node])
-        reach = center.buffer(INTERSECTION_REACH_M)
-        names = sorted({road[way_id] for way_id in way_ids})
-        if len(names) >= 2:
-            for i, first in enumerate(names):
-                for second in names[i + 1:]:
-                    overlap = corridors[first].intersection(corridors[second]).intersection(reach)
-                    pieces += [part for part in getattr(overlap, "geoms", [overlap])
-                               if part.geom_type == "Polygon" and part.distance(center) < 1]
-        else:
-            local = [shapes[way_id][0].intersection(reach).buffer(shapes[way_id][1], cap_style=2) for way_id in way_ids]
-            pieces += [a.intersection(b) for i, a in enumerate(local) for b in local[i + 1:] if a.intersects(b)]
-    pieces = [piece for piece in pieces if not piece.is_empty and piece.area > 0]
-    return unary_union(pieces) if pieces else None
 
 
 POLICE_ZONE_FILE = "child_zones_police.json"        # 경찰청_전국 보호구역 현황 API (pudo download)
@@ -247,11 +169,200 @@ def _map1000(folder):
     lines = [(geometry, record["차로수"], record["일방통행"] == "일방통행", record.get("도로명") or record.get("명칭") or "", record.get("도로폭") or None)
              for geometry, record in read("N1L_A0020000")]
     sidewalks = [(geometry, record["폭"] or None) for geometry, record in read("N1A_A0033320")]
+    safety = [(geometry, record["구조"]) for geometry, record in read("N1A_A0053326") if record.get("구조") in ("교통섬", "평면(도색)")]
     road = shapely.union_all([geometry for geometry, _ in read("N1A_A0010000")])
     if not lines or road.is_empty:
         return None
     carriageway = road.difference(shapely.union_all([geometry for geometry, _ in sidewalks])) if sidewalks else road
-    return Map1000(lines=lines, carriageway=carriageway, sidewalks=sidewalks)
+    return Map1000(lines=lines, carriageway=carriageway, sidewalks=sidewalks, safety=safety)
+
+
+MOCT_NODE_FILE = "vworld_moct_nodes_gangnam.geojson"   # 표준노드링크 노드 (VWorld LT_P_MOCTNODE)
+JUNCTION_SNAP_M = 2          # 1:1000 도로선 끝점이 이 거리 안에 모이면 같은 교차점
+MOCT_SNAP_M = 15             # 표준노드 교차로 점에서 이 거리 안에 1:1000 교차점이 있으면 같은 교차로
+MOCT_ARM_M = 12              # 1:1000 교차점이 없는 표준노드는 이 거리 안의 도로선을 팔로 봄
+DEFAULT_HALF_M = 3.0         # 차도 폭을 모르는 도로선의 띠 반폭
+WIDTH_AWAY_M = (15, 25)      # 교차점에서 도로를 따라 이만큼 떨어진 곳에서 차도 폭을 잼 (교차로 밖의 곧은 구간)
+CORNER_LOOK_M = 5            # 모퉁이 판단: 점 앞뒤 이 거리의 방향을 비교
+CORNER_TURN_DEG = 30         # 앞뒤 방향이 이보다 크게 꺾이면 도로의 모퉁이 (강남역 자료: 직선 이음 0~13°, 모퉁이 34° 이상)
+DIRECTION_LOOK_M = 2         # 도로선 위 한 점의 진행 방향을 잴 때 앞뒤로 보는 거리
+JUNCTION_LOOK_M = 3          # 교차점에서 각 도로의 방향을 잴 때 앞뒤로 보는 거리 (교차점의 짧은 꺾임에 덜 흔들리게 조금 길게)
+SEGMENT_MATCH_M = 1          # 이은 도로선 위 한 점에서 이 거리 안의 원래 토막을 찾아 그 도로폭을 씀
+INTERSECTION_MARGIN_M = 2    # 교차로·모퉁이 범위(두 반폭 네모의 대각선, 반폭 x 2)에 더하는 여유
+CLIP_TOLERANCE_M = 0.5       # 교차로 면을 차도 면으로 자를 때 차도 경계에 주는 여유
+CLIP_KEEP_RATIO = 0.5        # 차도 면으로 잘랐을 때 이 비율보다 많이 남으면 자른 면, 아니면(차도 면 없이 선만 있는 좁은 길) 자르지 않음
+
+
+def _moct_junctions(path):
+    """표준노드링크 노드 중 '교차로' 유형의 미터 좌표. 파일이 없으면 []."""
+    if not path.is_file():
+        return []
+    points = []
+    for feature in read_json(path)["features"]:
+        if not str(feature["properties"].get("nd_type_h", "")).startswith("교차로"):
+            continue
+        coordinates = feature["geometry"]["coordinates"]
+        while isinstance(coordinates[0], list):
+            coordinates = coordinates[0]
+        points.append(to_meters(*coordinates[:2]))
+    return points
+
+
+def _intersection_area_map1000(source, moct_points):
+    """1:1000 도로선·차도 폭으로 교차로 면을 만듭니다 (도로교통법 제32조 1·2호의 '교차로'와 '가장자리' 판정용).
+
+    1) 교차로 위치: 1:1000 도로선 끝점이 모인 곳 중 서로 다른 도로가 만나거나 같은 이름 길이 세 갈래 이상으로 갈라지는 곳
+       + 표준노드링크 '교차로' 점
+    2) 도로마다 띠: 같은 이름의 토막을 이은 도로선을 따라, 교차점에서 15·25m 떨어진 곳에서 잰 차도 폭만큼
+       (도로폭 - 양쪽 보도 폭, 모르면 6m)
+    3) 교차로 면 = 교차로 위치 주변에서 방향이 30° 넘게 다른 두 띠가 겹치는 부분(도로 끝선 4개가 만나는 네모), 차도 면 안으로 자름
+    둥근 모퉁이는 네모 모서리 바로 바깥이라 '가장자리 5m' 판정으로 덮습니다.
+    4) 같은 도로가 30° 넘게 꺾이는 '도로의 모퉁이'도 꺾이기 전·후 띠가 겹치는 부분을 면으로 넣습니다.
+    띠를 겹친 근사값이라 비스듬하거나 폭이 바뀌는 교차로에서는 몇 m 어긋날 수 있습니다.
+    반환: (교차로 면, 교차로 위치 목록)
+    """
+    from shapely.geometry import Point
+
+    def key(index):
+        name = source.lines[index][3]
+        return name or f"#{index}"
+
+    def end_direction(line, at_start):
+        a, b = (line.coords[0], line.coords[min(1, len(line.coords) - 1)]) if at_start else (line.coords[-1], line.coords[-2])
+        return math.degrees(math.atan2(b[0] - a[0], b[1] - a[1])) % 360
+
+    # 1:1000은 도로선을 교차점·속성 변화·도엽 경계마다 토막으로 나눠 그립니다. 같은 이름의 토막을 이어 한 줄로 만들어
+    # 띠를 그립니다 (교차로 근처의 2~7m짜리 토막으로 띠가 짧게 잘리지 않게). 이름 없는 선은 그대로 씁니다.
+    joined = []                                  # [(이어진 선, 도로 이름 또는 '#번호', 도로폭)]
+    by_name = defaultdict(list)
+    for index, (line, _, _, name, road_width) in enumerate(source.lines):
+        if name:
+            by_name[name].append(index)
+        else:
+            joined.append((line, f"#{index}", road_width))
+    for name, indices in by_name.items():
+        merged = shapely.line_merge(shapely.union_all([source.lines[i][0] for i in indices]))
+        widths = sorted(source.lines[i][4] for i in indices if source.lines[i][4])
+        road_width = widths[len(widths) // 2] if widths else None
+        joined += [(part, name, road_width) for part in getattr(merged, "geoms", [merged]) if part.geom_type == "LineString"]
+    def width_at(line, along, name):
+        """이어진 선 위 along 지점에서 가로로 잰 차도 폭 (모르면 None). 도로폭은 그 지점에 있는 원래 토막의 값을 씁니다
+        (같은 도로도 구간마다 도로폭이 다름. 서초대로는 53m 구간과 30m 구간이 있음)."""
+        along = min(max(along, 0.0), line.length)
+        at = line.interpolate(along)
+        a, b = line.interpolate(max(0.0, along - DIRECTION_LOOK_M)), line.interpolate(min(line.length, along + DIRECTION_LOOK_M))
+        heading = (math.degrees(math.atan2(b.x - a.x, b.y - a.y)) + 90) % 360
+        nearby = [i for i in source.line_tree.query(at.buffer(SEGMENT_MATCH_M)) if (source.lines[i][3] or f"#{i}") == name]
+        road_width = min(((source.lines[i][0].distance(at), source.lines[i][4]) for i in nearby), default=(None, None))[1]
+        return source.carriageway_width(at, heading, road_width)
+
+    def half_near(index, point):
+        """교차점에서 도로를 따라 WIDTH_AWAY_M 떨어진 곳(양쪽)에서 잰 차도 폭의 가운데 값 / 2.
+        교차로 한가운데서 재면 옆 길 쪽으로 빠져 넓게 나오므로 교차로 밖의 곧은 구간에서 잽니다."""
+        line, name, _ = joined[index]
+        at = line.project(point)
+        widths = sorted(w for offset in WIDTH_AWAY_M for sign in (1, -1)
+                        if 0 <= at + sign * offset <= line.length
+                        for w in [width_at(line, at + sign * offset, name)] if w)
+        if not widths:
+            widths = [w for w in [width_at(line, line.length / 2, name)] if w]
+        return widths[len(widths) // 2] / 2 if widths else DEFAULT_HALF_M
+
+    from shapely.strtree import STRtree
+    road_tree = STRtree([line for line, _, _ in joined])
+
+    # 1) 1:1000 교차점: 끝점 묶음
+    ends = []
+    for index, (line, *_) in enumerate(source.lines):
+        if line.length == 0:
+            continue
+        ends.append((Point(line.coords[0]), index, end_direction(line, True)))
+        ends.append((Point(line.coords[-1]), index, end_direction(line, False)))
+    clusters = []
+    for point, index, direction in ends:
+        for cluster in clusters:
+            if cluster["point"].distance(point) <= JUNCTION_SNAP_M:
+                cluster["arms"].append((index, direction)); break
+        else:
+            clusters.append({"point": point, "arms": [(index, direction)]})
+    nodes = []
+    for cluster in clusters:
+        arms = cluster["arms"]
+        # T자: 다른 선의 중간에 끝점이 닿는 경우 그 선도 팔
+        touching = {i for i in source.line_tree.query(cluster["point"].buffer(JUNCTION_SNAP_M))
+                    if source.lines[i][0].distance(cluster["point"]) <= JUNCTION_SNAP_M}
+        indices = {i for i, _ in arms} | touching
+        roads = {key(i) for i in indices}
+        if len(indices) == 2 and len(arms) == 2:
+            turn = abs((arms[0][1] - arms[1][1] + 180) % 360 - 180)
+            if turn > 180 - CONTINUATION_TURN_DEG:      # 거의 일직선으로 이어지면 같은 길의 분할 지점 (도엽 경계 등)
+                continue
+        if len(roads) >= 2 or len(indices) >= 3:       # 다른 도로가 만나거나, 같은 이름 길이 세 갈래 이상으로 갈라짐 (골목 가지)
+            nodes.append((cluster["point"], indices))
+    # 2) 표준노드 교차로 점 중 1:1000 교차점과 떨어진 것
+    for x, y in moct_points:
+        point = Point(x, y)
+        if any(node.distance(point) <= MOCT_SNAP_M for node, _ in nodes):
+            continue
+        indices = {i for i in source.line_tree.query(point.buffer(MOCT_ARM_M)) if source.lines[i][0].distance(point) <= MOCT_ARM_M}
+        if len({key(i) for i in indices}) >= 2:
+            nodes.append((point, indices))
+
+    pieces = []
+    for point, _ in nodes:
+        indices = [i for i in road_tree.query(point.buffer(MOCT_ARM_M)) if joined[i][0].distance(point) <= JUNCTION_SNAP_M]
+        if len(indices) < 2:
+            indices = [i for i in road_tree.query(point.buffer(MOCT_ARM_M)) if joined[i][0].distance(point) <= MOCT_ARM_M]
+        if len(indices) < 2:
+            continue
+        halves = {i: half_near(i, point) for i in indices}
+        widest = sorted(halves.values(), reverse=True)
+        # 십자로의 겹친 네모는 교차점에서 두 도로 반폭의 대각선 거리 안에 있습니다. 그 밖의 겹침은 나란히 달리는 길입니다.
+        local = point.buffer(math.hypot(widest[0], widest[1] if len(widest) > 1 else widest[0]) + INTERSECTION_MARGIN_M)
+        # 띠는 이은 도로선마다 따로 그리고, 방향이 30° 넘게 다른 두 띠의 겹침만 교차로로 봅니다
+        # (같은 이름 길이 T자로 갈라지는 골목도 잡히고, 일직선으로 이어지는 두 토막은 겹침으로 보지 않음).
+        def direction(i):
+            line = joined[i][0]; at = line.project(point)
+            a, b = line.interpolate(max(0.0, at - JUNCTION_LOOK_M)), line.interpolate(min(line.length, at + JUNCTION_LOOK_M))
+            return math.degrees(math.atan2(b.x - a.x, b.y - a.y)) % 180
+        bands = {i: joined[i][0].buffer(halves[i], cap_style=2).intersection(local) for i in indices}
+        pairs = [(a, b) for n, a in enumerate(indices) for b in indices[n + 1:]
+                 if min(abs(direction(a) - direction(b)), 180 - abs(direction(a) - direction(b))) > CORNER_TURN_DEG]
+        core = shapely.union_all([bands[a].intersection(bands[b]) for a, b in pairs]) if pairs else shapely.Polygon()
+        if core.is_empty:
+            continue
+        # 차도 면 안으로 자릅니다 (보도로 넘어가지 않게). 차도 면 없이 선만 그려진 좁은 길은 자르지 않습니다.
+        clipped = core.intersection(source.carriageway.buffer(CLIP_TOLERANCE_M))
+        pieces.append(clipped if clipped.area >= CLIP_KEEP_RATIO * core.area else core)
+    # 같은 도로가 꺾이는 모퉁이 (제32조 2호 '도로의 모퉁이'): 이은 도로선에서 앞뒤 CORNER_LOOK_M 방향이
+    # CORNER_TURN_DEG 넘게 꺾이는 점. 꺾이기 전·후 구간의 차도 띠가 겹치는 부분을 모퉁이 면으로 씁니다.
+    from shapely.ops import substring
+    corners = []
+    for index, (line, _, _) in enumerate(joined):
+        for x, y in line.coords[1:-1]:
+            at = line.project(Point(x, y))
+            if at < CORNER_LOOK_M or at > line.length - CORNER_LOOK_M:
+                continue
+            a, b, c = line.interpolate(at - CORNER_LOOK_M), line.interpolate(at), line.interpolate(at + CORNER_LOOK_M)
+            turn = abs((math.degrees(math.atan2(c.x - b.x, c.y - b.y)) - math.degrees(math.atan2(b.x - a.x, b.y - a.y)) + 180) % 360 - 180)
+            if turn < CORNER_TURN_DEG:
+                continue
+            if any(b.distance(node) <= MOCT_SNAP_M for node, _ in nodes) or any(b.distance(q) <= CORNER_LOOK_M for q, _, _ in corners):
+                continue                                  # 교차로이거나 이미 찾은 모퉁이
+            corners.append((b, index, at))
+    for point, index, at in corners:
+        line = joined[index][0]
+        half = half_near(index, point)
+        reach = 2 * half + INTERSECTION_MARGIN_M
+        before = substring(line, max(0.0, at - reach), at).buffer(half, cap_style=3)    # 꺾인 점 너머로 반폭만큼 연장
+        after = substring(line, at, min(line.length, at + reach)).buffer(half, cap_style=3)
+        core = before.intersection(after).intersection(point.buffer(reach))
+        if core.is_empty:
+            continue
+        clipped = core.intersection(source.carriageway.buffer(CLIP_TOLERANCE_M))
+        pieces.append(clipped if clipped.area >= CLIP_KEEP_RATIO * core.area else core)
+    area = shapely.union_all(pieces) if pieces else None
+    return area, [(point.x, point.y) for point, _ in nodes] + [(point.x, point.y) for point, _, _ in corners]
 
 
 ZONE_API_FILE = "child_protection_zones.json"       # 전국어린이보호구역표준데이터 API (pudo download)
@@ -476,9 +587,13 @@ def load_map_data(data_dir, sv_dir):
             facility_seeds, _ = zone_evidence([], [], facilities)
             child_zone_facility = build_child_zone(roads, facility_seeds, boundaries)
             evidence = evidence + facility_seeds
+    # 교차로 면: 1:1000 도로선·차도 폭 + 표준노드 교차로 점. 1:1000이 없으면 교차로 면 없음(H1 자료 없음 → 확인 필요)
+    map1000 = _map1000(data_dir / MAP1000_DIR)
+    intersection_area, junctions = (_intersection_area_map1000(map1000, _moct_junctions(data_dir / MOCT_NODE_FILE))
+                                    if map1000 is not None else (None, []))
     return MapData(
-        intersections=_intersections(roads),
-        intersection_area=_intersection_area(roads, _half_widths(data_dir / "candidates_v1.geojson")),
+        intersections=junctions,
+        intersection_area=intersection_area,
         crosswalks=points("C 횡단보도"),
         hydrants=points("C 소화전"),
         buses=points("C 버스정류소"),
@@ -496,7 +611,7 @@ def load_map_data(data_dir, sv_dir):
         images=_images(sv_dir / "metadata.csv"),
         taxi_stands=_taxi_stands(data_dir / TAXI_STAND_FILE),
         police_zones=_police_zones(data_dir / POLICE_ZONE_FILE),
-        map1000=_map1000(data_dir / MAP1000_DIR),
+        map1000=map1000,
         lines_2023=_confirm_2023(dict(lines), _lane_points_2023(data_dir / LANE_2023_FILE)),
     )
 

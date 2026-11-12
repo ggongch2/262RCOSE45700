@@ -13,7 +13,7 @@ from shapely.geometry import LineString, Point, box
 def candidate():
     return {
         "type": "Feature", "geometry": {"type": "Point", "coordinates": [CENTER_LON, CENTER_LAT]},
-        "properties": {"id": "P0000", "road_type": "primary", "lanes": 2, "lanes_source": "hdmap",
+        "properties": {"id": "P0000", "road_type": "primary", "lanes": 2, "lanes_source": "map1000",
                        "oneway": False, "heading": 90, "road_width_m": 10},
     }
 
@@ -75,16 +75,18 @@ class RuleTests(unittest.TestCase):
         data.hd_link = [[(-50, 0), (50, 0)]]
         data.hd_reg = [[(-50, 0), (50, 0)]]  # 후보점이 규제선 위에 있음 (거리 0)
         result = judge(feature, data)
-        self.assertEqual(result["properties"]["verdict"], "확인 필요")
-        self.assertIn("H5 규제선 자료 불일치 (서울시 2021 없음, 정밀도로지도 있음) → 사진 확인", result["properties"]["check_reasons"])
+        self.assertEqual(result["properties"]["verdict"], "불가")   # 최신 자료(정밀도로지도) 우선
+        self.assertIn("H5 주정차금지 구간 (정밀도로지도)", result["properties"]["fail_reasons"])
+        h5 = next(c for c in result["properties"]["checks"] if c["item"] == "H5 규제선")
+        self.assertIn("2021 서울시 자료엔 없음", h5["value"])
 
     def test_hdmap_curb_threshold_is_configurable(self):
         feature, data = candidate(), clear_map()
         data.hd_link = [[(-50, 0), (50, 0)]]
         data.hd_reg = [[(-50, 5.5), (50, 5.5)]]
-        self.assertTrue(any(r.startswith("H5 규제선 자료 불일치") for r in judge(feature, data)["properties"]["check_reasons"]))
+        self.assertIn("H5 주정차금지 구간 (정밀도로지도)", judge(feature, data)["properties"]["fail_reasons"])
         narrow = {**TH, "H5 정밀도로지도 규제선": 5}
-        self.assertFalse(any(r.startswith("H5") for r in judge(feature, data, thresholds=narrow)["properties"]["check_reasons"]))
+        self.assertFalse(any(r.startswith("H5") for r in judge(feature, data, thresholds=narrow)["properties"]["fail_reasons"]))
 
     def test_intersection_uses_area_edge_per_road_traffic_act(self):
         # 제32조 1호 교차로 안, 2호 가장자리 5m 이내는 불가. 완화 모드에서도 풀지 않음
@@ -156,7 +158,7 @@ class DesignatedFacilityAndWidthTests(unittest.TestCase):
         return feature
 
     def test_planned_grade_fills_missing_width_and_flags_contradiction(self):
-        # candidate()는 heading 90(연석이 동쪽) → 도로는 남북 방향
+        # candidate()는 heading 90(차도 끝이 동쪽) → 도로는 남북 방향
         data = clear_map(); data.planned_roads = [(box(-10, -100, 10, 100), "중로3류", 12)]
         missing = judge(self.one_lane(None), data)["properties"]
         p1 = next(c for c in missing["checks"] if c["item"] == "P1 통과 폭")
@@ -198,7 +200,7 @@ class TaxiStandTests(unittest.TestCase):
         return judge(feature, data, rules_off=SIDEWALK_KNOWN)["properties"]
 
     def test_distance_along_the_road_sets_verdict(self):
-        # candidate()는 heading 90: 연석이 동쪽(+x), 도로는 남북(y) 방향
+        # candidate()는 heading 90: 차도 끝이 동쪽(+x), 도로는 남북(y) 방향
         for along, expected in ((5, "불가"), (9, "확인 필요"), (13, "가능")):
             with self.subTest(along=along):
                 result = self.verdict((2, along))
@@ -218,7 +220,7 @@ class TaxiStandTests(unittest.TestCase):
         self.assertEqual(self.verdict((-2, 1))["verdict"], "가능")
 
     def test_stand_inside_oneway_carriageway_belongs_to_its_curb(self):
-        # 중앙분리대로 나뉜 대로의 한쪽 차도: 승차대 좌표가 차도 안에 찍혀도 그 연석의 승차대
+        # 중앙분리대로 나뉜 대로의 한쪽 차도: 승차대 좌표가 차도 안에 찍혀도 그 차도 끝의 승차대
         self.assertEqual(self.verdict((-2, 1), oneway=True, curb_offset_m=5)["verdict"], "불가")
 
     def test_missing_stand_file_requires_confirmation(self):
@@ -257,7 +259,7 @@ class TaxiStandTests(unittest.TestCase):
 
 
 class Lane2023Tests(unittest.TestCase):
-    """H5: 정밀도로지도가 없는 도로의 2021 서울시 금지선을 2023 서울시 차선 목록으로 확인."""
+    """H5: 정밀도로지도가 없는 도로는 2021 서울시 금지선을 2023 서울시 차선 목록(더 최신)으로 판단."""
 
     def judge_line(self, confirmed):
         feature, data = candidate(), clear_map()
@@ -271,13 +273,14 @@ class Lane2023Tests(unittest.TestCase):
         self.assertIn("H5 주정차금지 구간 (2021 선 + 2023 목록)", result["fail_reasons"])
         self.assertFalse(next(c for c in result["checks"] if c["item"] == "H5 규제선")["estimated"])
 
-    def test_line_missing_in_2023_requires_photo(self):
-        result = self.judge_line(False)
-        self.assertEqual(result["verdict"], "확인 필요")
-        self.assertIn("H5 2021 주정차금지선이 2023 목록에 없음 → 사진 확인", result["check_reasons"])
+    def test_line_missing_in_2023_passes_with_note(self):
+        result = self.judge_line(False)                                 # 최신 자료(2023 목록)에 없으면 통과
+        self.assertEqual(result["verdict"], "가능")
+        h5 = next(c for c in result["checks"] if c["item"] == "H5 규제선")
+        self.assertIn("2021 서울시 자료엔 금지선 있음", h5["value"])
 
     def test_without_2023_list_keeps_single_source_fail(self):
-        self.assertIn("H5 주정차금지 구간 (2021 서울시 자료, 단일 출처)", self.judge_line(None)["fail_reasons"])
+        self.assertIn("H5 주정차금지 구간 (2021 서울시 자료)", self.judge_line(None)["fail_reasons"])
 
     def test_reads_seoul_lane_workbook_and_matches_lines(self):
         import tempfile
@@ -369,7 +372,7 @@ class Map1000Tests(unittest.TestCase):
     def map1000(self, total=4, oneway=False, sidewalk=True, road_width=24.0):
         from pudo.datasets import Map1000
         line = LineString([(-50, 0), (50, 0)])                       # 후보 중심선(0,0)과 같은 동서 방향 도로
-        road, walk = box(-50, -12, 50, 12), box(-50, 5, 50, 12)      # 도로경계 24m, 북쪽(연석 쪽, heading 0)에 보도 7m
+        road, walk = box(-50, -12, 50, 12), box(-50, 5, 50, 12)      # 도로경계 24m, 북쪽(차도 끝 쪽, heading 0)에 보도 7m
         walks = [(walk, 7.0)] if sidewalk else []
         return Map1000(lines=[(line, total, oneway, "테스트로", road_width)], carriageway=road.difference(walk) if sidewalk else road, sidewalks=walks)
 
@@ -382,8 +385,8 @@ class Map1000Tests(unittest.TestCase):
     def test_lanes_total_is_split_by_direction(self):
         m, result = self.judge_map(total=4)
         self.assertEqual(m["map1000"]["lanes_total"], 4)
-        lane = next(c for c in result["checks"] if c["item"] == "P1 잔여 차로")
-        self.assertEqual(lane["value"], "편도 2차로 (1:1000 수치지형도)")
+        width = next(c for c in result["checks"] if c["item"] == "P1 통과 폭")
+        self.assertIn("편도 2차로", width["value"])                     # 폭(17m)을 먼저 보고 차로 수는 함께 표시
         self.assertEqual(result["verdict"], "가능")
 
     def test_carriageway_width_excludes_sidewalk(self):
@@ -394,15 +397,26 @@ class Map1000Tests(unittest.TestCase):
         self.assertTrue(width["pass"])
         self.assertIn("차도 폭 17.0m (1:1000 도로폭−보도폭)", width["value"])
 
+    def test_width_is_checked_before_lanes_even_on_one_way(self):
+        feature, data = candidate(), clear_map()
+        feature["properties"].update({"centerline": [CENTER_LON, CENTER_LAT], "heading": 0, "lanes_source": "default", "lanes": 1})
+        data.map1000 = self.map1000(total=1, oneway=True, sidewalk=False, road_width=4.0)   # 4m 일방 골목
+        result = judge(feature, data, rules_off=("A1",))["properties"]
+        self.assertIn("P1 통과 폭 부족 (차도 4.0m, 일방 기준 5.5m)", result["fail_reasons"])
+        data.map1000 = self.map1000(total=1, oneway=True, sidewalk=False, road_width=6.0)   # 6m 일방: 통과
+        self.assertEqual(judge(feature, data, rules_off=("A1",))["properties"]["verdict"], "가능")
+        data.map1000 = self.map1000(total=1, oneway=False, sidewalk=False, road_width=6.0)  # 6m 양방: 불가
+        self.assertEqual(judge(feature, data, rules_off=("A1",))["properties"]["verdict"], "불가")
+
     def test_width_uses_written_road_width_minus_sidewalk(self):
         feature, data = candidate(), clear_map()
         feature["properties"].update({"centerline": [CENTER_LON, CENTER_LAT], "heading": 0, "lanes_source": "default", "lanes": 1})
         data.map1000 = self.map1000(total=1, road_width=10.0)          # 10 - 보도 7 = 3m
         result = judge(feature, data, rules_off=("A1",))["properties"]
-        self.assertIn("P1 통과 폭 부족 (차도 3.0m, 1:1000, 양방향)", result["fail_reasons"])
+        self.assertIn("P1 통과 폭 부족 (차도 3.0m, 양방 기준 8.5m)", result["fail_reasons"])
 
     def test_narrow_carriageway_fails(self):
-        thresholds = dict(TH, **{"P1 통과폭": 20})
+        thresholds = dict(TH, **{"P1 통과폭 양방": 20})
         feature, data = candidate(), clear_map()
         feature["properties"].update({"centerline": [CENTER_LON, CENTER_LAT], "heading": 0, "lanes_source": "default", "lanes": 1})
         data.map1000 = self.map1000(total=1)
@@ -430,6 +444,59 @@ class Map1000Tests(unittest.TestCase):
         result = judge(feature, data, photos=photos)["properties"]
         self.assertEqual(result["verdict"], "확인 필요")
         self.assertIn("A1 보도 지도(1:1000 없음)와 사진 판독(있음) 불일치", result["check_reasons"])
+
+
+class Map1000IntersectionTests(unittest.TestCase):
+    """H1: 1:1000 도로선·차도 폭으로 만든 교차로 면, H7: 1:1000 안전지대 면."""
+
+    def cross(self):
+        from pudo.datasets import Map1000
+        ew, ns = LineString([(-60, 0), (0, 0)]), LineString([(0, -60), (0, 0)])       # 끝점이 (0,0)에서 만나는 두 도로
+        ew2, ns2 = LineString([(0, 0), (60, 0)]), LineString([(0, 0), (0, 60)])
+        lines = [(ew, 4, False, "가로", 20.0), (ew2, 4, False, "가로", 20.0), (ns, 2, False, "세로", 10.0), (ns2, 2, False, "세로", 10.0)]
+        road = box(-60, -10, 60, 10).union(box(-5, -60, 5, 60))
+        return Map1000(lines=lines, carriageway=road, sidewalks=[])
+
+    def test_crossing_bands_make_intersection_box(self):
+        from pudo.datasets import _intersection_area_map1000
+        area, nodes = _intersection_area_map1000(self.cross(), [])
+        self.assertEqual(len(nodes), 1)
+        self.assertAlmostEqual(area.area, 20 * 10, delta=5)            # 가로 차도 20m x 세로 차도 10m
+        self.assertTrue(area.contains(Point(0, 0)))
+        self.assertFalse(area.contains(Point(0, 20)))
+
+    def test_straight_split_of_same_road_is_not_an_intersection(self):
+        from pudo.datasets import Map1000, _intersection_area_map1000
+        lines = [(LineString([(-60, 0), (0, 0)]), 2, False, "", 8.0), (LineString([(0, 0), (60, 0)]), 2, False, "", 8.0)]
+        area, nodes = _intersection_area_map1000(Map1000(lines=lines, carriageway=box(-60, -4, 60, 4), sidewalks=[]), [])
+        self.assertEqual(nodes, [])
+        self.assertIsNone(area)
+
+    def test_bend_of_one_road_is_a_corner(self):
+        # 도로교통법 제32조 2호 '도로의 모퉁이': 같은 도로가 90° 꺾이는 곳도 면으로 잡힘
+        from pudo.datasets import Map1000, _intersection_area_map1000
+        bend = LineString([(-60, 0), (0, 0), (0, 60)])
+        lines = [(bend, 1, False, "꺾인길", 6.0)]
+        area, nodes = _intersection_area_map1000(Map1000(lines=lines, carriageway=box(-60, -3, 3, 3).union(box(-3, -3, 3, 60)), sidewalks=[]), [])
+        self.assertEqual([(round(x), round(y)) for x, y in nodes], [(0, 0)])
+        self.assertTrue(area.contains(Point(0, 0)))
+        self.assertAlmostEqual(area.area, 36, delta=4)                  # 반폭 3m씩 연장한 두 띠의 겹침 6m x 6m
+
+    def test_same_name_t_branch_is_an_intersection(self):
+        # 골목 가지는 본선과 이름이 같은 경우가 많음 ('○○로7길'이 T자로 갈라짐)
+        from pudo.datasets import Map1000, _intersection_area_map1000
+        lines = [(LineString([(-60, 0), (0, 0)]), 1, False, "골목길", 6.0), (LineString([(0, 0), (60, 0)]), 1, False, "골목길", 6.0),
+                 (LineString([(0, 0), (0, 60)]), 1, False, "골목길", 6.0)]
+        area, nodes = _intersection_area_map1000(Map1000(lines=lines, carriageway=box(-60, -3, 60, 3).union(box(-3, 0, 3, 60)), sidewalks=[]), [])
+        self.assertEqual([(round(x), round(y)) for x, y in nodes], [(0, 0)])
+        self.assertTrue(area.contains(Point(0, 1)))
+
+    def test_map1000_safety_area_blocks_within_10m(self):
+        feature, data = candidate(), clear_map()
+        data.map1000 = self.cross()
+        data.map1000.safety = [(box(5, -2, 9, 2), "평면(도색)")]       # 후보(0,0)에서 5m
+        result = judge(feature, data, rules_off=SIDEWALK_KNOWN)["properties"]
+        self.assertIn("H7 안전지대 5.0m (기준 10m, 1:1000)", result["fail_reasons"])
 
 
 if __name__ == "__main__":

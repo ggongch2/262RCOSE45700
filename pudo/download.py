@@ -103,20 +103,15 @@ def fetch_vworld_data(key, layer, bbox, label):
     return features, page - 1
 
 
-def fetch_parcels(key, bbox):
-    """연속지적도에서 지목 '도' 필지만 선택."""
-    features, pages = fetch_vworld_data(key, "LP_PA_CBND_BUBUN", bbox, "지적도")
-    roads = [f for f in features if str(f.get("properties", {}).get("jibun", "")).strip().endswith("도")]
-    if not roads:
-        raise DownloadError("VWorld 지적도: 도로 필지를 찾지 못했습니다.")
-    result = collection(roads)
-    result["pudo_source"] = {"all_parcels": len(features), "road_parcels": len(roads), "pages": pages}
-    return result
-
-
 def fetch_upis_roads(key, bbox):
     """도시계획시설(도로) 면. 규모별 등급(광로·대로·중로·소로 1~3류)을 폭 근거로 씁니다."""
     features, _ = fetch_vworld_data(key, "LT_C_UPISUQ151", bbox, "도시계획시설 도로")
+    return collection(features)
+
+
+def fetch_moct_nodes(key, bbox):
+    """표준노드링크 노드 (교차로 위치. nd_type_h가 '교차로시·종점'인 점을 H1 교차로 위치로 씁니다)."""
+    features, _ = fetch_vworld_data(key, "LT_P_MOCTNODE", bbox, "표준노드")
     return collection(features)
 
 
@@ -339,10 +334,10 @@ def main(argv=None):
     tasks = [
         ("layers_gangnam.json", "repository_snapshot", "data_preview/gangnam_preview.html", lambda: restore_layers(preview)),
         ("osm_roads_gangnam.json", "download", OVERPASS, lambda: fetch_roads(bbox)),
-        ("vworld_road_parcels_gangnam.geojson", "download", VWORLD_DATA, lambda: fetch_parcels(key, bbox)),
         ("hdmap/lt_l_a2link.geojson", "download", VWORLD_WFS, lambda: fetch_hdmap(key, "lt_l_a2link", bbox)),
         ("hdmap/lt_l_b2surfacelinemark.geojson", "download", VWORLD_WFS, lambda: fetch_hdmap(key, "lt_l_b2surfacelinemark", bbox)),
         ("vworld_upis_roads_gangnam.geojson", "download", VWORLD_DATA, lambda: fetch_upis_roads(key, bbox)),
+        ("vworld_moct_nodes_gangnam.geojson", "download", VWORLD_DATA, lambda: fetch_moct_nodes(key, bbox)),
     ] + [
         (filename, "download", SEOUL_DATASET.format(dataset), lambda d=dataset, p=prefix, m=member: fetch_tgis(d, p, m, bbox))
         for filename, (dataset, prefix, member) in TGIS_LAYERS.items()

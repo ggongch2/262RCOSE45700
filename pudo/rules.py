@@ -11,7 +11,7 @@ from .vision import apply_observations, validate_confidence_threshold
 
 RULE_NAMES = {
     "H1": "교차로", "H2": "횡단보도", "H3": "정류장", "H4": "소화전", "H5": "규제선·전용차로",
-    "H6": "어린이보호구역", "H7": "안전지대", "H8": "택시승강장", "P1": "통과 폭·차로", "A1": "보도", "A2": "연석 막힘(사진)",
+    "H6": "어린이보호구역", "H7": "안전지대", "H8": "택시승강장", "P1": "통과 폭·차로", "A1": "보도", "A2": "차도 끝 접근 막힘(사진)",
     "V0": "사진 대응", "V1": "사진 규제선", "V2": "공사(사진)", "V3": "일시적 점유(사진)",
 }
 
@@ -27,16 +27,16 @@ def rule_code(text):
 
 
 def _checks(m, th):
-    """측정값 → (checks, 불가 사유, 확인 사유, 연석 선 상태)."""
+    """측정값 → (checks, 불가 사유, 확인 사유, 차도 끝 선 상태)."""
     checks, fails, needs = [], [], []
 
     def dist_rule(item, d, thr):
         if d is None:
             checks.append(dict(item=item, value=None, threshold=f"{thr}m 초과", **{"pass": None}, estimated=False)); needs.append(f"{item} 데이터 없음"); return
-        ok = d > thr; near = (not ok) or (d <= thr + th["COORD_ERR"])
+        ok = d > thr; near = (not ok) or (d <= thr + th["H1~H4 오차 범위"])
         checks.append(dict(item=item, value=f"{d:.1f}m", threshold=f"{thr}m 초과", **{"pass": ok}, estimated=False))
         if not ok: fails.append(f"{item} {d:.1f}m (기준 {thr}m)")
-        elif near: needs.append(f"{item} {d:.1f}m, 기준 {thr}m에 근접 (좌표 오차 ±{th['COORD_ERR']}m)")
+        elif near: needs.append(f"{item} {d:.1f}m, 기준 {thr}m에 근접 (오차 범위 {th['H1~H4 오차 범위']}m)")
 
     # ① 합법 — 거리
     # 도로교통법 제32조: 교차로 안(1호), 교차로 가장자리·도로 모퉁이 5m 이내(2호) 정차 금지.
@@ -84,14 +84,16 @@ def _checks(m, th):
         checks.append(dict(item="H6 어린이보호구역", value=zone["label"], threshold=f"대상시설 {th['H6 학교']}m 밖 (지정 구간 미확인)", **{"pass": not inside}, estimated=True))
         if inside: fails.append(f"H6 어린이보호구역 ({zone['label']}, 임시 버퍼)")
 
-    # ① 합법 — 안전지대 사방 10m (정밀도로지도 531). 지도가 없는 도로는 판정하지 않음
+    # ① 합법 — 안전지대 사방 10m (제32조 3호). 정밀도로지도 노면선 531 + 1:1000 안전지대 면(교통섬·도색).
+    # 두 자료 모두 덮지 않는 곳은 판정하지 않음
     safety = m["safety_zone"]
     if safety["covered"]:
-        d_sz = safety["distance"]
-        if d_sz is not None and d_sz <= th["H7 안전지대"]:
-            checks.append(dict(item="H7 안전지대", value=f"{d_sz:.1f}m", threshold=f"{th['H7 안전지대']}m 초과", **{"pass": False}, estimated=False)); fails.append(f"H7 안전지대 {d_sz:.1f}m (기준 {th['H7 안전지대']}m)")
+        d_sz, near = safety["distance"], th["H7 안전지대"]
+        if _within(d_sz, near):
+            checks.append(dict(item="H7 안전지대", value=f"{d_sz:.1f}m ({safety.get('source')})", threshold=f"안전지대(빗금·교통섬)에서 {near}m 초과", **{"pass": False}, estimated=False))
+            fails.append(f"H7 안전지대 {d_sz:.1f}m (기준 {near}m, {safety.get('source')})")
         else:
-            checks.append(dict(item="H7 안전지대", value=f"{d_sz:.1f}m" if d_sz is not None and d_sz < 9e8 else "없음", threshold=f"{th['H7 안전지대']}m 초과", **{"pass": True}, estimated=False))
+            checks.append(dict(item="H7 안전지대", value=f"{d_sz:.1f}m" if d_sz is not None else "없음", threshold=f"안전지대(빗금·교통섬)에서 {near}m 초과", **{"pass": True}, estimated=False))
 
     # ① 운영 — 택시승강장. 승차대 목록에는 시설물 점만 있어 정차 구간 길이를 모릅니다.
     # 택시 1대 길이 안은 불가, 2대 길이 안은 구간에 걸칠 수 있어 확인 필요로 둡니다.
@@ -107,30 +109,44 @@ def _checks(m, th):
         if status is False: fails.append(f"H8 택시승강장 {d_taxi:.1f}m (기준 택시 1대 {ban}m, {taxi['label']})")
         elif status is None: needs.append(f"H8 택시승차대 {d_taxi:.1f}m, 정차 구간 길이 모름 (택시 2대 {review}m 안) → 사진 확인")
 
-    # ① 합법 — 규제선. 서울시 2021 자료와 정밀도로지도 2023~25를 교차 확인
+    # ① 합법 — 규제선. 그 지점을 덮는 가장 최신 자료 하나로 판단합니다.
+    #   1) 정밀도로지도(2023 무렵)가 덮으면 정밀도로지도만
+    #   2) 아니면 2021 서울시 금지선이 2023 서울시 차선 목록에도 있는지
+    #   3) 2023 목록도 없으면 2021 서울시 금지선
+    # 2021 자료와 결과가 다르면 항목 값에만 적어 둡니다 (로드뷰 확인 때 참고).
     line = m["reg_line"]
-    tgis_ban = _within(line["tgis_no_stop"], th["H5 규제선"])
-    hd_cov = line["hd_covered"]
-    hd_th = th["H5 정밀도로지도 규제선"]
-    hd_ban = hd_cov and _within(line["hd_no_stop"], hd_th)
-    if tgis_ban and hd_ban:
-        curb = "yellow_solid"; checks.append(dict(item="H5 규제선", value="주정차금지 구간 (2021 서울시 + 2023 정밀도로지도 일치)", threshold="금지 구간 아님", **{"pass": False}, estimated=False)); fails.append("H5 주정차금지 구간 (두 자료 일치)")
-    elif tgis_ban and hd_cov:
-        curb = "unknown"; checks.append(dict(item="H5 규제선", value="2021 서울시: 금지 / 2023 정밀도로지도: 없음", threshold="금지 구간 아님", **{"pass": None}, estimated=True)); needs.append("H5 규제선 자료 불일치 (서울시 2021 금지, 정밀도로지도 없음) → 사진 확인")
-    elif tgis_ban and line.get("tgis_no_stop_2023") is True:
-        curb = "yellow_solid"; checks.append(dict(item="H5 규제선", value="주정차금지 구간 (2021 서울시 선, 2023 서울시 목록에도 있음)", threshold="금지 구간 아님", **{"pass": False}, estimated=False)); fails.append("H5 주정차금지 구간 (2021 선 + 2023 목록)")
-    elif tgis_ban and line.get("tgis_no_stop_2023") is False:
-        curb = "unknown"; checks.append(dict(item="H5 규제선", value="2021 서울시: 금지 / 2023 서울시 목록: 없음", threshold="금지 구간 아님", **{"pass": None}, estimated=True)); needs.append("H5 2021 주정차금지선이 2023 목록에 없음 → 사진 확인")
+    near, hd_th = th["H5 규제선"], th["H5 정밀도로지도 규제선"]
+    tgis_ban = _within(line["tgis_no_stop"], near)
+    listed_2023 = line.get("tgis_no_stop_2023")
+
+    def h5(value, ok, estimated, state):
+        checks.append(dict(item="H5 규제선", value=value, threshold="금지 구간 아님", **{"pass": ok}, estimated=estimated))
+        return state
+
+    if line["hd_covered"]:
+        differs_2021 = lambda banned: "" if banned == tgis_ban else (" / 2021 서울시 자료엔 금지선 있음" if tgis_ban else " / 2021 서울시 자료엔 없음")
+        if _within(line["hd_no_stop"], hd_th):
+            curb = h5("주정차금지선 (정밀도로지도)" + differs_2021(True), False, False, "yellow_solid")
+            fails.append("H5 주정차금지 구간 (정밀도로지도)")
+        elif _within(line["hd_bus"], hd_th):
+            curb = h5("버스전용차로 (정밀도로지도). 시간제면 심야 가능" + differs_2021(False), None, True, "unknown")
+            needs.append("H5 버스전용차로, 운영 시간 확인 (표지)")
+        elif _within(line["hd_no_park"], hd_th):
+            curb = h5("황색점선 (주차금지, 정차 가능, 정밀도로지도)" + differs_2021(False), True, False, "yellow_dashed")
+        else:
+            curb = h5("규제선 없음 (정밀도로지도)" + differs_2021(False), True, False, "unknown")
+    elif tgis_ban and listed_2023 is True:
+        curb = h5("주정차금지선 (2021 서울시 선, 2023 서울시 목록에도 있음)", False, False, "yellow_solid")
+        fails.append("H5 주정차금지 구간 (2021 선 + 2023 목록)")
+    elif tgis_ban and listed_2023 is False:
+        curb = h5("규제선 없음 (2023 서울시 목록) / 2021 서울시 자료엔 금지선 있음", True, True, "unknown")
     elif tgis_ban:
-        curb = "yellow_solid"; checks.append(dict(item="H5 규제선", value="주정차금지 구간 (2021 서울시 자료, 교차 확인 불가)", threshold="금지 구간 아님", **{"pass": False}, estimated=True)); fails.append("H5 주정차금지 구간 (2021 서울시 자료, 단일 출처)")
-    elif hd_ban:
-        curb = "unknown"; checks.append(dict(item="H5 규제선", value="2021 서울시: 없음 / 2023 정밀도로지도: 규제선 있음", threshold="금지 구간 아님", **{"pass": None}, estimated=True)); needs.append("H5 규제선 자료 불일치 (서울시 2021 없음, 정밀도로지도 있음) → 사진 확인")
-    elif hd_cov and _within(line["hd_bus"], hd_th):
-        curb = "unknown"; checks.append(dict(item="H5 규제선", value="버스전용차로 (2023 정밀도로지도). 시간제면 심야 가능", threshold="금지 구간 아님", **{"pass": None}, estimated=True)); needs.append("H5 버스전용차로, 운영 시간 확인 (표지)")
-    elif _within(line["tgis_no_park"], th["H5 규제선"]) or (hd_cov and _within(line["hd_no_park"], hd_th)):
-        curb = "yellow_dashed"; checks.append(dict(item="H5 규제선", value="황색점선 (주차금지, 정차 가능)", threshold="금지 구간 아님", **{"pass": True}, estimated=False))
+        curb = h5("주정차금지선 (2021 서울시 자료, 2023 목록 없음)", False, True, "yellow_solid")
+        fails.append("H5 주정차금지 구간 (2021 서울시 자료)")
+    elif _within(line["tgis_no_park"], near):
+        curb = h5("황색점선 (주차금지, 정차 가능, 2021 서울시)", True, False, "yellow_dashed")
     else:
-        curb = "unknown"; checks.append(dict(item="H5 규제선", value="두 자료 모두 규제선 없음" if hd_cov else "2021 자료에 규제선 없음 (정밀도로지도 미커버)", threshold="금지 구간 아님", **{"pass": True}, estimated=not hd_cov))
+        curb = h5("규제선 없음 (2021 서울시 자료)", True, True, "unknown")
 
     # ② 물리 — 잔여 차로 / 통과 폭
     lanes, oneway, lane_source = m["lanes"]["value"], m["road"]["oneway"], m["lanes"]["source"]
@@ -141,40 +157,40 @@ def _checks(m, th):
         # 1:1000 수치지형도 차로수는 양방향 합. 차선이 없는 도로는 1로 적혀 있어 양방향이면 편도 0(차선 없음)이 됩니다.
         oneway = oneway or bool(map1000.get("oneway"))
         per_direction = map1000["lanes_total"] if oneway else map1000["lanes_total"] // 2
-        # 1:1000이 넓게(편도 2 이상) 보는데 정밀도로지도가 좁게 보면 확인. 반대는 1:1000을 따름 (더 보수적이고,
-        # 정밀도로지도 차로 수는 후보 15m 안 링크의 최댓값이라 골목에서 옆 큰길 차로를 잡는 경우가 많음).
-        if lane_source == "정밀도로지도" and per_direction >= 2 and lanes < 2:
-            needs.append(f"P1 차로 수 자료 불일치 (1:1000 편도 {per_direction}, 정밀도로지도 편도 {lanes}) → 사진 확인")
         lanes, lane_source = per_direction, "1:1000 수치지형도"
-    if oneway or (lanes is not None and lanes >= 2):
-        checks.append(dict(item="P1 잔여 차로", value="일방통행" if oneway else f"편도 {lanes}차로 ({lane_source})", threshold="편도 2차로 이상 또는 일방통행", **{"pass": True}, estimated=False))
-    elif carriageway is not None:
-        # 차도 폭 = 1:1000 도로중심선 도로폭(보도 포함) - 양쪽 보도 폭
-        need = th["P1 통과폭"]; ok = carriageway >= need
-        value = f"차도 폭 {carriageway:.1f}m (1:1000 도로폭−보도폭), " + ("차선 없음" if lanes == 0 else f"편도 {lanes}차로")
-        checks.append(dict(item="P1 통과 폭", value=value, threshold=f"{need}m 이상", **{"pass": ok}, estimated=False))
+    # 1단계 통과 폭: 차도 폭을 알면 폭으로 판정합니다. 서 있는 차 옆으로 지나갈 폭이 남아야 합니다.
+    #   일방통행 = 차 2.5 + 한 방향 3.0, 양방통행 = 차 2.5 + 양방향 각 3.0
+    # 2단계 잔여 차로: 차도 폭을 모를 때만, 편도 2차로 이상·일방통행이면 통과로 봅니다 (큰길).
+    need = th["P1 통과폭 일방"] if oneway else th["P1 통과폭 양방"]
+    lane_text = "일방통행" if oneway else ("차선 없음" if lanes == 0 else f"편도 {lanes}차로" if lanes is not None else "차로 수 모름")
+    if carriageway is not None:
+        ok = carriageway >= need
+        value = f"차도 폭 {carriageway:.1f}m (1:1000 도로폭−보도폭), {lane_text}"
+        checks.append(dict(item="P1 통과 폭", value=value, threshold=f"{need}m 이상 ({'일방' if oneway else '양방'})", **{"pass": ok}, estimated=False))
         if not ok:
-            fails.append(f"P1 통과 폭 부족 (차도 {carriageway:.1f}m, 1:1000, 양방향)")
+            fails.append(f"P1 통과 폭 부족 (차도 {carriageway:.1f}m, {'일방' if oneway else '양방'} 기준 {need}m)")
+    elif oneway or (lanes is not None and lanes >= 2):
+        checks.append(dict(item="P1 잔여 차로", value=f"{lane_text} ({lane_source})" if not oneway else "일방통행", threshold="차도 폭 모름 → 편도 2차로 이상 또는 일방통행", **{"pass": True}, estimated=True))
     else:
         if lanes is None:
             needs.append("P1 차로 수 모름 (1:1000·정밀도로지도·OSM에 없음)")
-        # 폭 근거: 지적도 도로 필지 폭(보도 포함 땅 폭)과 도시계획시설 도로 등급(법정 최소 폭).
-        need = th["P1 통과폭"]; threshold = f"{need}m 이상"
+        # 차도 폭을 모를 때: 1:1000 도로폭(보도 포함)과 도시계획시설 도로 등급(법정 최소 폭).
+        threshold = f"{need}m 이상"
         planned_ok = planned is not None and planned["min_width"] >= need
         planned_text = f"도시계획 {planned['grade']} ({planned['min_width']}m 이상)" if planned else None
         if width is not None and width >= need:
-            value = f"도로 땅 폭 {width:.1f}m (보도 포함)" + (f", {planned_text}" if planned_text else "")
+            value = f"도로폭 {width:.1f}m (1:1000, 보도 포함)" + (f", {planned_text}" if planned_text else "")
             checks.append(dict(item="P1 통과 폭", value=value, threshold=threshold, **{"pass": True}, estimated=True))
-            needs.append("P1 폭이 보도 포함 지적도 값 (추정)")
+            needs.append("P1 폭이 보도 포함 도로폭 (차도 폭 모름)")
         elif width is not None and planned_ok:
-            checks.append(dict(item="P1 통과 폭", value=f"지적도 {width:.1f}m / {planned_text}", threshold=threshold, **{"pass": None}, estimated=True))
-            needs.append(f"P1 폭 자료 불일치 (지적도 {width:.1f}m, {planned_text}) → 사진 확인")
+            checks.append(dict(item="P1 통과 폭", value=f"도로폭 {width:.1f}m / {planned_text}", threshold=threshold, **{"pass": None}, estimated=True))
+            needs.append(f"P1 폭 자료 불일치 (도로폭 {width:.1f}m, {planned_text}) → 사진 확인")
         elif width is not None:
-            checks.append(dict(item="P1 통과 폭", value=f"도로 땅 폭 {width:.1f}m (보도 포함)" + (f", {planned_text}" if planned_text else ""), threshold=threshold, **{"pass": False}, estimated=True))
-            fails.append(f"P1 통과 폭 부족 ({width:.1f}m, 편도 1차로 양방향)")
+            checks.append(dict(item="P1 통과 폭", value=f"도로폭 {width:.1f}m (1:1000, 보도 포함)" + (f", {planned_text}" if planned_text else ""), threshold=threshold, **{"pass": False}, estimated=True))
+            fails.append(f"P1 통과 폭 부족 ({width:.1f}m, 양방 기준 {need}m)")
         elif planned_ok:
             checks.append(dict(item="P1 통과 폭", value=f"{planned_text}, 보도 포함", threshold=threshold, **{"pass": True}, estimated=True))
-            needs.append(f"P1 폭이 도시계획 등급 하한 ({planned['grade']}, 지적도 폭 없음)")
+            needs.append(f"P1 폭이 도시계획 등급 하한 ({planned['grade']}, 도로폭 없음)")
         else:
             checks.append(dict(item="P1 통과 폭", value=planned_text, threshold=threshold, **{"pass": None}, estimated=True)); needs.append("P1 도로 폭 없음 (단지 내 통로일 수 있음)")
 
