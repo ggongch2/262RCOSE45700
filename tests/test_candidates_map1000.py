@@ -44,5 +44,19 @@ class Map1000CandidateTests(unittest.TestCase):
         self.assertTrue(all(p["road_type"] == "residential" and p["osm_way"] is None for p in self.props))
 
 
+class Map1000IslandTests(unittest.TestCase):
+    def test_candidate_skips_a_sidewalk_island_in_the_middle_of_the_road(self):
+        # 강남대로 중앙 버스승강장처럼 사방이 차도인 보도 면은 차도 끝이 아님 → 바깥 차도 끝(7m)에 후보
+        with tempfile.TemporaryDirectory() as temp:
+            data = Path(temp)
+            write_map1000(data / "map1000", island=True)
+            features, _ = candidates._from_map1000(data / "map1000", data / "osm_roads_gangnam.json")
+        beside = [f["properties"] for f in features if f["properties"]["name"] == "가로로"
+                  and -140 < to_meters(*f["geometry"]["coordinates"])[0] < -70 and to_meters(*f["geometry"]["coordinates"])[1] > 0]
+        self.assertTrue(beside)
+        for p in beside:
+            self.assertAlmostEqual(p["curb_offset_m"], 7 - 1.5, delta=0.2)
+
+
 if __name__ == "__main__":
     unittest.main()

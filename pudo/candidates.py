@@ -4,6 +4,7 @@
   - 후보 = 차도 끝에서 1.5m 안쪽(차 중심). 양방향은 양쪽, 일방통행은 OSM 진행 방향 우측(방향을 모르면 양쪽).
   - 차도 면이 없는 좁은 길(1:1000은 중심선만 그림)은 적힌 도로폭의 절반을 차도 끝으로 본다.
   - 교차로 안처럼 차도 끝을 찾지 못하면 후보를 만들지 않는다.
+  - 차도 가운데 섬(중앙 버스승강장처럼 보도로 그려졌지만 사방이 차도인 면)은 차도 끝으로 보지 않고 건너간다.
   - 도로 유형(road_type)·일방 진행 방향·osm_way는 같은 방향으로 가장 가까운 OSM 길에서 가져온다 (화면 필터용, 없으면 생략).
 
 입력: data/map1000/ (+ 있으면 data/osm_roads_gangnam.json)
@@ -15,6 +16,7 @@ import json
 import math
 from collections import defaultdict
 
+import shapely
 from shapely.geometry import Point, LineString
 from shapely.strtree import STRtree
 
@@ -27,6 +29,7 @@ STEP, RADIUS = SAMPLE_STEP_M, RADIUS_M
 MAP1000_CURB_RAY_M = 40      # 중심선에서 차도 끝을 찾는 최대 거리
 MAP1000_MEDIAN_M = 12        # 중심선이 중앙분리대 위에 있을 때, 이 거리 안에서 시작하는 차도만 같은 쪽 차도로 봄
 MAP1000_GAP_M = 2            # 차도 사이 틈이 이보다 작으면 이어진 차도로 봄 (작은 교통섬·면 경계)
+ISLAND_TOUCH_M = 1.0         # 보도 면을 이만큼 넓혀도 도로(차도+보도) 밖으로 나가지 않으면 차도 가운데 섬(중앙 버스승강장 등)으로 봄
 CURB_INSET_M = 1.5           # 차도 끝에서 차 중심까지
 OSM_MATCH_M = 20             # 이 거리 안, 방향 차이 30° 이하의 OSM 길을 같은 도로로 봄
 DIRECTION_LOOK_M = 2         # 도로선 위 한 점의 진행 방향을 잴 때 앞뒤로 보는 거리
@@ -46,6 +49,17 @@ def _from_map1000(folder, osm_path):
            if e["type"] == "way" and e["tags"].get("highway") in DRIVABLE] if osm_path.is_file() else []
     osm_lines = [LineString([m(p["lon"], p["lat"]) for p in w["geometry"]]) for w in osm]
     osm_tree = STRtree(osm_lines) if osm_lines else None
+    road = shapely.union_all([source.carriageway] + [area for area, _ in source.sidewalks])
+    walk_tree = STRtree([area for area, _ in source.sidewalks]) if source.sidewalks else None
+
+    def island(x, y):
+        """(x, y)를 덮는 보도 면이 차도로 둘러싸인 섬인지 (강남대로 중앙 버스승강장처럼 1:1000에 보도로 그려진 곳)."""
+        point = Point(x, y)
+        for i in (walk_tree.query(point) if walk_tree is not None else []):
+            area = source.sidewalks[i][0]
+            if area.covers(point):
+                return area.buffer(ISLAND_TOUCH_M).difference(road).area < ISLAND_TOUCH_M
+        return False
 
     def osm_match(point, direction):
         """같은 방향 OSM 길: (way, 진행 방향과 1:1000 선 방향이 같은지)."""
@@ -73,8 +87,9 @@ def _from_map1000(folder, osm_path):
             return (road_width / 2, "1:1000 도로폭/2 (차도 면 없음)") if road_width else (None, None)
         start, end = spans[0]
         for begin, finish in spans[1:]:
-            if begin - end > MAP1000_GAP_M:
-                break
+            middle = (begin + end) / 2
+            if begin - end > MAP1000_GAP_M and not island(center.x + dx * middle, center.y + dy * middle):
+                break   # 틈이 길가 보도·도로 밖이면 여기가 차도 끝. 차도 가운데 섬이면 건너서 계속
             end = max(end, finish)
         if end >= MAP1000_CURB_RAY_M - RAY_END_TOLERANCE_M:   # 끝까지 차도: 교차로·광장 안
             return None, None
