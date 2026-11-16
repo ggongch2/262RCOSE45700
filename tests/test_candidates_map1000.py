@@ -15,7 +15,7 @@ class Map1000CandidateTests(unittest.TestCase):
         self.data = Path(self.temp.name)
         write_map1000(self.data / "map1000")
         with patch.object(candidates, "DATA_DIR", self.data):
-            self.features, self.skipped = candidates._from_map1000(self.data / "map1000")
+            self.features, self.skipped = candidates._from_map1000(self.data / "map1000", self.data / "osm_roads_gangnam.json")
         self.props = [f["properties"] for f in self.features]
 
     def tearDown(self):

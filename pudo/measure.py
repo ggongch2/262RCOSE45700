@@ -323,9 +323,12 @@ def is_stale(data_dir, sv_dir):
 
 def prepare(data_dir, sv_dir):
     """입력 데이터 → 측정값과 지도 근거 레이어를 data/prepared/에 저장합니다."""
+    from .candidates import generate
     from .datasets import load_inputs
     from .export import overlay_layers
 
+    if (Path(data_dir) / "map1000").is_dir():   # 후보 목록도 지금 코드로 다시 만듭니다 (예전 후보 파일이 남아 번호가 어긋나지 않게)
+        generate(data_dir)
     candidates, data = load_inputs(data_dir, sv_dir)
     measurements = measure_all(candidates, data)
     measurement_path, layer_path = prepared_paths(data_dir)

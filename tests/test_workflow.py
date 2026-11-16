@@ -146,10 +146,13 @@ class WorkflowTests(unittest.TestCase):
             path = data / "prepared" / "measurements.json"
             old = dict(prepared, code_version="old-code", candidates=[])
             path.write_text(json.dumps(old))
+            # 예전 코드로 만든 후보 파일이 남아 있어도 지금 코드로 다시 만듭니다.
+            (data / "candidates_v1.geojson").write_text(json.dumps({"type": "FeatureCollection", "features": []}))
             os.utime(path, (later + 5, later + 5)); os.utime(data / "prepared" / "layers.json", (later + 5, later + 5))
             self.assertFalse(is_stale(data, sv))
             reloaded, _ = load_prepared(data, sv)
-            self.assertEqual(len(reloaded), len(generated))
+            self.assertEqual([m["id"] for m in reloaded], [f["properties"]["id"] for f in generated])
+            self.assertEqual(json.loads((data / "candidates_v1.geojson").read_text())["features"], generated)
             self.assertEqual(json.loads(path.read_text())["code_version"], code_version())
             for source, judged in zip(generated, result["features"]):
                 self.assertEqual(judged["geometry"], source["geometry"])

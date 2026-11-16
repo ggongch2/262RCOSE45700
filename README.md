@@ -112,7 +112,7 @@ python -m pudo pipeline     # 기본 조건 판정 → data/pudo_v0.geojson, web
 python -m pudo serve        # 담당자 화면: 조건을 바꿔 가며 판정 (127.0.0.1 전용)
 ```
 
-처리는 세 단계로 나뉩니다. **수집**(`download`)은 원본을 받고, **준비**(`candidates`, `prepare`)는 후보 위치와 후보별 측정값(시설까지 거리, 보호구역 안/밖, 차로·폭 등)을 구하며, **판정**(`pipeline`)은 측정값에 기준값(`pudo/config.py`의 `TH`)과 규칙을 적용합니다. 준비는 기준값을 쓰지 않고, 데이터에 없는 값은 가정하지 않고 모름으로 둡니다. `pipeline`은 측정값이 없거나 입력보다 오래되었을 때만 준비를 다시 합니다.
+처리는 세 단계로 나뉩니다. **수집**(`download`)은 원본을 받고, **준비**(`candidates`, `prepare`)는 후보 위치와 후보별 측정값(시설까지 거리, 보호구역 안/밖, 차로·폭 등)을 구하며, **판정**(`pipeline`)은 측정값에 기준값(`pudo/config.py`의 `TH`)과 규칙을 적용합니다. 준비는 기준값을 쓰지 않고, 데이터에 없는 값은 가정하지 않고 모름으로 둡니다. `pipeline`·`server`는 측정값이 없거나, 입력보다 오래되었거나, 측정 코드가 바뀌었을 때 준비를 다시 하며 이때 후보 목록(`candidates_v1.geojson`)도 새로 만듭니다.
 
 사진 판독 결과가 있으면 `--photo-results`로 함께 넣습니다. 파일은 [`schemas/photo-observations.v1.schema.json`](schemas/photo-observations.v1.schema.json) 형식을 따라야 하며, 파이프라인은 모델을 호출하지 않고 이 파일만 읽습니다. 관측값은 신뢰도가 `--photo-min-confidence`(기본 0.8, 임시 운영값) 이상일 때만 판정에 반영합니다.
 

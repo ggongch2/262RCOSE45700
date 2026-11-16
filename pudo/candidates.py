@@ -38,12 +38,12 @@ def _bearing(a, b):
     return math.degrees(math.atan2(b[0] - a[0], b[1] - a[1])) % 360
 
 
-def _from_map1000(folder):
+def _from_map1000(folder, osm_path):
     """1:1000 수치지형도 중심선·차도 면으로 후보 Feature 목록을 만듭니다."""
     from .datasets import _map1000
     source = _map1000(folder)
-    osm = [e for e in json.loads((DATA_DIR / "osm_roads_gangnam.json").read_text(encoding="utf-8"))["elements"]
-           if e["type"] == "way" and e["tags"].get("highway") in DRIVABLE] if (DATA_DIR / "osm_roads_gangnam.json").is_file() else []
+    osm = [e for e in json.loads(osm_path.read_text(encoding="utf-8"))["elements"]
+           if e["type"] == "way" and e["tags"].get("highway") in DRIVABLE] if osm_path.is_file() else []
     osm_lines = [LineString([m(p["lon"], p["lat"]) for p in w["geometry"]]) for w in osm]
     osm_tree = STRtree(osm_lines) if osm_lines else None
 
@@ -125,20 +125,24 @@ def _from_map1000(folder):
     return feats, skipped
 
 
-def main(argv=None):
-    argparse.ArgumentParser(description="도로망에서 승하차 후보 생성").parse_args(argv)
-    if not (DATA_DIR / "map1000").is_dir():
+def generate(data_dir):
+    """data_dir/map1000 → data_dir/candidates_v1.geojson. 측정 준비(measure.prepare) 때마다 다시 만듭니다."""
+    from pathlib import Path
+    data_dir = Path(data_dir)
+    if not (data_dir / "map1000").is_dir():
         raise SystemExit("필요한 입력이 없습니다: data/map1000/ (1:1000 수치지형도). 공유 데이터 묶음을 풀어 주세요.")
-    feats, skipped = _from_map1000(DATA_DIR / "map1000")
-    _save(feats, f"1:1000 수치지형도 기준. 차도 끝을 찾지 못해 건너뛴 점(교차로 안 등) {skipped}개")
-
-
-def _save(feats, note):
-    with (DATA_DIR / "candidates_v1.geojson").open("w", encoding="utf-8") as stream:
+    feats, skipped = _from_map1000(data_dir / "map1000", data_dir / "osm_roads_gangnam.json")
+    with (data_dir / "candidates_v1.geojson").open("w", encoding="utf-8") as stream:
         json.dump({"type": "FeatureCollection", "features": feats}, stream, ensure_ascii=False)
     by = defaultdict(int)
     for f in feats: by[f["properties"]["road_type"]] += 1
-    print(f"후보 {len(feats)}개 ({note}). 도로 유형별: {dict(by)}")
+    print(f"후보 {len(feats)}개 (1:1000 수치지형도 기준. 차도 끝을 찾지 못해 건너뛴 점(교차로 안 등) {skipped}개). 도로 유형별: {dict(by)}")
+    return feats
+
+
+def main(argv=None):
+    argparse.ArgumentParser(description="도로망에서 승하차 후보 생성").parse_args(argv)
+    generate(DATA_DIR)
     print("저장: data/candidates_v1.geojson")
 
 
