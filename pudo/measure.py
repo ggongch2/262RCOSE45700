@@ -10,6 +10,7 @@
 """
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -27,6 +28,8 @@ HD_COVER_M = 15                       # 후보에서 이 거리 안에 정밀도
 NO_STOP = ("010", "014", "015", "005", "017")   # T-GIS 규제차선 코드: 주정차금지
 NO_PARK = ("009",)                              # T-GIS 규제차선 코드: 주차금지 (정차 가능)
 LANE_SOURCE = {"map1000": "1:1000 수치지형도"}
+# 측정값을 만드는 코드. 이 파일들이 바뀌면 저장된 측정값을 다시 만듭니다 (판정 코드 rules.py는 제외).
+PREPARE_MODULES = ("candidates.py", "config.py", "datasets.py", "export.py", "geo.py", "measure.py", "zones.py")
 TAXI_SEARCH_M = 60                    # 이 직선거리 안의 택시승차대만 봄 (같은 도로 앞뒤)
 TAXI_SIDEWALK_M = 15                  # 승차대 좌표가 차도 끝에서 바깥(보도·건물 쪽)으로 이만큼까지는 같은 도로로 봄
 
@@ -300,6 +303,15 @@ def _input_files(data_dir, sv_dir):
     return [path for path in files if path.exists()]
 
 
+def code_version():
+    """측정 코드 지문. 줄바꿈(CRLF/LF)을 맞춰서 Windows·Linux에서 같은 값이 나옵니다."""
+    digest = hashlib.sha256()
+    for name in PREPARE_MODULES:
+        digest.update(name.encode())
+        digest.update((Path(__file__).parent / name).read_bytes().replace(b"\r\n", b"\n"))
+    return digest.hexdigest()[:16]
+
+
 def is_stale(data_dir, sv_dir):
     """측정값 파일이 없거나 입력 데이터보다 오래되었는지."""
     measurement_path, layer_path = prepared_paths(data_dir)
@@ -318,7 +330,7 @@ def prepare(data_dir, sv_dir):
     measurements = measure_all(candidates, data)
     measurement_path, layer_path = prepared_paths(data_dir)
     measurement_path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"schema_version": SCHEMA_VERSION, "generated_at": datetime.now(timezone.utc).isoformat(),
+    payload = {"schema_version": SCHEMA_VERSION, "code_version": code_version(), "generated_at": datetime.now(timezone.utc).isoformat(),
                "count": len(measurements), "candidates": measurements}
     for path, value in ((measurement_path, payload), (layer_path, overlay_layers(data))):
         temp = path.with_suffix(path.suffix + ".tmp")
@@ -333,7 +345,8 @@ def load_prepared(data_dir, sv_dir, *, refresh=False):
     if refresh or is_stale(data_dir, sv_dir):
         prepare(data_dir, sv_dir)
     payload = json.loads(measurement_path.read_text(encoding="utf-8"))
-    if payload.get("schema_version") != SCHEMA_VERSION:
+    if payload.get("schema_version") != SCHEMA_VERSION or payload.get("code_version") != code_version():
+        print("측정 코드가 바뀌어 측정값을 다시 준비합니다…", flush=True)
         prepare(data_dir, sv_dir)
         payload = json.loads(measurement_path.read_text(encoding="utf-8"))
     return payload["candidates"], json.loads(layer_path.read_text(encoding="utf-8"))

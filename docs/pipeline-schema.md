@@ -15,11 +15,11 @@
        pudo_v0.geojson / pudo_v0_data.js / pudo_v0_standalone.html
 ```
 
-`pipeline.run_pipeline`은 측정값을 읽고(없거나 입력보다 오래되면 `measure.prepare`로 다시 만들고) 판정과 저장을 연결합니다. 구분 기준은 "운영 기준이 바뀌면 이 값도 바뀌나"입니다. 바뀌면 판정(`rules.py`), 데이터가 바뀌어야만 바뀌면 준비(`measure.py`)입니다.
+`pipeline.run_pipeline`은 측정값을 읽고(없거나 입력보다 오래되었거나 측정 코드가 바뀌었으면 `measure.prepare`로 다시 만들고) 판정과 저장을 연결합니다. 구분 기준은 "운영 기준이 바뀌면 이 값도 바뀌나"입니다. 바뀌면 판정(`rules.py`), 데이터가 바뀌어야만 바뀌면 준비(`measure.py`)입니다.
 
 ### 측정값 (`data/prepared/measurements.json`)
 
-`{schema_version: "pudo-measure.v5", generated_at, count, candidates: [...]}`. 후보 하나의 필드입니다. 거리는 m이며 null은 모름(자료 없음)입니다.
+`{schema_version: "pudo-measure.v5", code_version, generated_at, count, candidates: [...]}`. `code_version`은 측정 코드(`measure.PREPARE_MODULES`) 지문이며, 지금 코드와 다르면 자동으로 다시 만듭니다. 후보 하나의 필드입니다. 거리는 m이며 null은 모름(자료 없음)입니다.
 
 | 필드 | 내용 |
 |---|---|
