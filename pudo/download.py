@@ -14,6 +14,7 @@ from pathlib import Path
 
 from .config import CENTER_LAT, CENTER_LON, DATA_DIR, DRIVABLE, ROOT, api_key
 from .geo import CX, CY
+from .poi import OSM_POI_FILE
 
 VWORLD_DATA = "https://api.vworld.kr/req/data"
 VWORLD_WFS = "https://api.vworld.kr/req/wfs"
@@ -208,6 +209,21 @@ def fetch_roads(bbox):
     return prepare_roads(response)
 
 
+def fetch_poi(bbox):
+    west, south, east, north = bbox
+    bounds = f"({south},{west},{north},{east})"
+    query = (f'[out:json][timeout:40];'
+             f'(way["building"]["name"]{bounds};way["building"]["addr:housenumber"]{bounds};'
+             f'way["building"]["brand"]{bounds};)->.buildings;'
+             f'.buildings out geom;'
+             f'(node(w.buildings)["entrance"];node["entrance"]{bounds};'
+             f'node["railway"="subway_entrance"]{bounds};);out body;')
+    result = request_json(OVERPASS, {"data": query}, post=True)
+    if result.get("remark") or not isinstance(result.get("elements"), list):
+        raise DownloadError("OSM: POI 쿼리를 완료하지 못했습니다.")
+    return result
+
+
 def prepare_roads(response):
     """후보 생성 대상 차도만 남깁니다. 보행로 접속부는 차량 교차로에 포함하지 않습니다."""
     elements = response.get("elements", [])
@@ -323,13 +339,26 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="강남역 원본 지도 수집 및 시설 스냅샷 복원")
     parser.add_argument("--out", type=Path, default=DATA_DIR, help="입력 데이터 저장 폴더")
     parser.add_argument("--refresh", action="store_true", help="이미 존재하는 파일도 다시 수집")
+    parser.add_argument("--poi-only", action="store_true", help="키 없이 OSM POI 자료만 수집")
     args = parser.parse_args(argv)
+    bbox = [round(CENTER_LON - 600 / CX, 7), round(CENTER_LAT - 600 / CY, 7),
+            round(CENTER_LON + 600 / CX, 7), round(CENTER_LAT + 600 / CY, 7)]
+    if args.poi_only:
+        path = args.out / OSM_POI_FILE
+        if path.is_file() and not args.refresh:
+            print(f"유지: {path}")
+            return
+        try:
+            data = fetch_poi(bbox)
+            save_json(path, data)
+        except DownloadError as error:
+            parser.exit(1, f"{error}\n")
+        print(f"저장: {path} ({len(data['elements'])}건)")
+        return
     key = api_key("vworld")
     if not key:
         parser.error("env의 vworld_api 또는 환경변수 VWORLD_API_KEY를 설정하세요.")
     # 판정 영역 500m보다 넓은 600m 주변을 수집합니다. 시설은 기존 확장 스냅샷을 복원합니다.
-    bbox = [round(CENTER_LON - 600 / CX, 7), round(CENTER_LAT - 600 / CY, 7),
-            round(CENTER_LON + 600 / CX, 7), round(CENTER_LAT + 600 / CY, 7)]
     preview = ROOT / "data_preview" / "gangnam_preview.html"
     tasks = [
         ("layers_gangnam.json", "repository_snapshot", "data_preview/gangnam_preview.html", lambda: restore_layers(preview)),

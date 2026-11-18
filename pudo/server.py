@@ -25,6 +25,7 @@ from .rules import RULE_NAMES, evaluate_all
 from .vision import load_assessments
 
 MAX_BODY = 64 * 1024
+MAX_EXPORT_BODY = 1024 * 1024
 
 
 class RequestError(ValueError):
@@ -73,8 +74,17 @@ class App:
     def default_script(self):
         return data_script(self.evaluate(), thresholds=TH, layers=self.layers)
 
-    def export_html(self, thresholds, rules_off):
-        script = data_script(self.evaluate(thresholds, rules_off), thresholds=thresholds, layers=self.layers, rules_off=rules_off)
+    def export_html(self, thresholds, rules_off, poi_names=None):
+        result = self.evaluate(thresholds, rules_off)
+        for feature in result["features"]:
+            properties = feature["properties"]
+            name = (poi_names or {}).get(properties["id"])
+            candidates = properties["poi_candidates"]
+            if isinstance(name, str) and name.strip() and (
+                any(name == candidate["name"] for candidate in candidates) or len(name.strip()) <= 100
+            ):
+                properties["poi_name"] = name.strip()
+        script = data_script(result, thresholds=thresholds, layers=self.layers, rules_off=rules_off)
         return standalone_html(self.index_html(), script)
 
 
@@ -94,9 +104,9 @@ def make_handler(app):
         def _json(self, status, value):
             self._send(status, json.dumps(value, ensure_ascii=False), "application/json; charset=utf-8")
 
-        def _body(self):
+        def _body(self, limit=MAX_BODY):
             length = int(self.headers.get("Content-Length") or 0)
-            if length > MAX_BODY:
+            if length < 0 or length > limit:
                 raise RequestError("요청 본문이 너무 큽니다.")
             return self.rfile.read(length)
 
@@ -114,14 +124,19 @@ def make_handler(app):
         def do_POST(self):
             path = self.path.split("?")[0]
             try:
-                thresholds, rules_off = parse_conditions(self._body())
+                body = self._body(MAX_EXPORT_BODY if path == "/api/export" else MAX_BODY)
+                thresholds, rules_off = parse_conditions(body)
             except RequestError as error:
                 self._json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
                 return
             if path == "/api/evaluate":
                 self._json(HTTPStatus.OK, app.evaluate(thresholds, rules_off))
             elif path == "/api/export":
-                self._send(HTTPStatus.OK, app.export_html(thresholds, rules_off), "text/html; charset=utf-8",
+                poi_names = json.loads(body or b"{}").get("poi_names", {})
+                if not isinstance(poi_names, dict):
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "poi_names는 객체여야 합니다."})
+                    return
+                self._send(HTTPStatus.OK, app.export_html(thresholds, rules_off, poi_names), "text/html; charset=utf-8",
                            {"Content-Disposition": 'attachment; filename="pudo_result.html"'})
             else:
                 self._json(HTTPStatus.NOT_FOUND, {"error": "없는 주소입니다."})

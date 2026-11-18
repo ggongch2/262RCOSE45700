@@ -16,6 +16,7 @@ from shapely.geometry import shape
 
 from .config import CONTINUATION_TURN_DEG, require_files
 from .geo import to_meters
+from .poi import OSM_POI_FILE, PoiIndex
 from .zones import build_child_zone, zone_evidence
 
 
@@ -43,6 +44,7 @@ class MapData:
     taxi_stands: list = field(default_factory=list)      # [(좌표, 설명)] 서울시 택시승차대. None이면 자료 없음
     lines_2023: dict = None                              # {선 코드: [2023 목록에도 있는지]} lines와 같은 순서. None이면 2023 목록 없음
     police_zones: list = None                            # [(면, 시설 이름)] 경찰청 어린이보호구역 지정 경계. None이면 자료 없음
+    poi_index: object = None
     map1000: object = None                               # Map1000 (1:1000 수치지형도 도로중심선·차도·보도). None이면 자료 없음
 
 
@@ -591,7 +593,10 @@ def load_map_data(data_dir, sv_dir):
     map1000 = _map1000(data_dir / MAP1000_DIR)
     intersection_area, junctions = (_intersection_area_map1000(map1000, _moct_junctions(data_dir / MOCT_NODE_FILE))
                                     if map1000 is not None else (None, []))
+    poi_path = data_dir / OSM_POI_FILE
+    osm_pois = read_json(poi_path)["elements"] if poi_path.is_file() else []
     return MapData(
+        poi_index=PoiIndex(map1000, layers, roads, osm_pois) if map1000 is not None else None,
         intersections=junctions,
         intersection_area=intersection_area,
         crosswalks=points("C 횡단보도"),

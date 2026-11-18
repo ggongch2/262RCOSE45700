@@ -29,7 +29,7 @@ NO_STOP = ("010", "014", "015", "005", "017")   # T-GIS 규제차선 코드: 주
 NO_PARK = ("009",)                              # T-GIS 규제차선 코드: 주차금지 (정차 가능)
 LANE_SOURCE = {"map1000": "1:1000 수치지형도"}
 # 측정값을 만드는 코드. 이 파일들이 바뀌면 저장된 측정값을 다시 만듭니다 (판정 코드 rules.py는 제외).
-PREPARE_MODULES = ("candidates.py", "config.py", "datasets.py", "export.py", "geo.py", "measure.py", "zones.py")
+PREPARE_MODULES = ("candidates.py", "config.py", "datasets.py", "export.py", "geo.py", "measure.py", "poi.py", "zones.py")
 TAXI_SEARCH_M = 60                    # 이 직선거리 안의 택시승차대만 봄 (같은 도로 앞뒤)
 TAXI_SIDEWALK_M = 15                  # 승차대 좌표가 차도 끝에서 바깥(보도·건물 쪽)으로 이만큼까지는 같은 도로로 봄
 
@@ -245,6 +245,7 @@ def measure(feature, data):
     d_intersection = distance_to_area(p, data.intersection_area)
     hd_covered = (d := distance_to_segments(p, data.hd_link)) is not None and d <= HD_COVER_M
     lanes_known = pr.get("lanes_source") in LANE_SOURCE
+    poi_candidates, poi_fallback = data.poi_index.suggest(p, pr["heading"]) if data.poi_index is not None else ([], None)
     return {
         "id": pr["id"], "coordinates": feature["geometry"]["coordinates"], "heading": pr["heading"],
         "side": pr.get("side"), "centerline": pr.get("centerline"),
@@ -278,6 +279,7 @@ def measure(feature, data):
         # 서울시 택시승차대 (시설물 점). None = 자료 없음, distance None = 같은 쪽 60m 안에 없음
         "taxi_stand": _taxi_stand(pr, p, data),
         "image": _image(pr, p, data),
+        "poi_candidates": poi_candidates, "poi_fallback": poi_fallback,
     }
 
 
@@ -296,7 +298,7 @@ def _input_files(data_dir, sv_dir):
              "child_protection_zones.csv", "vworld_upis_roads_gangnam.geojson", "hdmap/lt_l_a2link.geojson",
              "hdmap/lt_l_b2surfacelinemark.geojson", "tgis/A064_P_signs.geojson", "tgis/A054_P_text_marks.geojson",
              "taxi_stands.xlsx", "tgis/lane_facilities_2023.xlsx", "child_zones_police.json",
-             "vworld_moct_nodes_gangnam.geojson"]
+             "vworld_moct_nodes_gangnam.geojson", "osm_poi_gangnam.json"]
     files = [data_dir / name for name in names] + [Path(sv_dir) / "metadata.csv"]
     # 압축을 풀면 shp는 원본 날짜(2025년)를 유지하므로 폴더 자체의 날짜도 봅니다.
     files += [data_dir / "map1000", *sorted((data_dir / "map1000").glob("*/*.shp"))] if (data_dir / "map1000").is_dir() else []
