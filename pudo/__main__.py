@@ -35,6 +35,7 @@ def check():
         "child_protection_zones.json",
         "child_zones_police.json",
         "taxi_stands.xlsx",
+        "seoul_bus_stops.geojson",
         "candidates_v1.geojson",
     ):
         print(f"data/{name}: {'있음' if (DATA_DIR / name).is_file() else '없음'}")

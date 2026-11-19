@@ -296,7 +296,7 @@ def _input_files(data_dir, sv_dir):
              "child_protection_zones.csv", "vworld_upis_roads_gangnam.geojson", "hdmap/lt_l_a2link.geojson",
              "hdmap/lt_l_b2surfacelinemark.geojson", "tgis/A064_P_signs.geojson", "tgis/A054_P_text_marks.geojson",
              "taxi_stands.xlsx", "tgis/lane_facilities_2023.xlsx", "child_zones_police.json",
-             "vworld_moct_nodes_gangnam.geojson"]
+             "vworld_moct_nodes_gangnam.geojson", "seoul_bus_stops.geojson"]
     files = [data_dir / name for name in names] + [Path(sv_dir) / "metadata.csv"]
     # 압축을 풀면 shp는 원본 날짜(2025년)를 유지하므로 폴더 자체의 날짜도 봅니다.
     files += [data_dir / "map1000", *sorted((data_dir / "map1000").glob("*/*.shp"))] if (data_dir / "map1000").is_dir() else []

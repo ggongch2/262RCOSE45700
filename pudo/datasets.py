@@ -470,6 +470,16 @@ def _taxi_stands(path):
     return stands
 
 
+BUS_STOP_FILE = "seoul_bus_stops.geojson"   # 서울시 버스정류소 위치정보 최신판 (OA-15067, python -m pudo download)
+
+
+def _bus_stops(data_dir, layers):
+    """버스정류장 미터 좌표. 최신 서울시 파일이 있으면 그것, 없으면 1주차 스냅샷(layers_gangnam.json, 일부 누락 있음)."""
+    path = Path(data_dir) / BUS_STOP_FILE
+    features = read_json(path)["features"] if path.is_file() else layers["C 버스정류소"]["features"]
+    return [to_meters(*feature["geometry"]["coordinates"]) for feature in features]
+
+
 LANE_2023_FILE = "tgis/lane_facilities_2023.xlsx"   # 서울시 차선시설물현황 (OA-15537 차선시설물현황_0724.xlsx, 2023-07)
 LANE_2023_KINDS = {"주정차금지": "010", "버스정차구획선": "015", "정차금지지대": "014"}   # 2021 T-GIS 선 코드와 대응
 LANE_MATCH_M = 3   # 2023 목록의 점이 2021 선에서 이 거리 안이면 같은 선 (좌표 대조 허용 오차, 판정 기준값 아님)
@@ -596,7 +606,7 @@ def load_map_data(data_dir, sv_dir):
         intersection_area=intersection_area,
         crosswalks=points("C 횡단보도"),
         hydrants=points("C 소화전"),
-        buses=points("C 버스정류소"),
+        buses=_bus_stops(data_dir, layers),
         schools=facilities,
         planned_roads=_planned_roads(data_dir / PLANNED_ROAD_FILE),
         child_zone=child_zone,
