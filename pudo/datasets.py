@@ -12,10 +12,11 @@ from xml.etree import ElementTree
 
 import numpy as np
 import shapely
-from shapely.geometry import shape
+from shapely.geometry import Point, Polygon, shape
 
-from .config import CONTINUATION_TURN_DEG, require_files
-from .geo import to_meters
+from .config import CONTINUATION_TURN_DEG, RADIUS_M, require_files
+from .geo import to_lonlat, to_meters
+from .poi import BUILDING_SIDE_M, CURB_PROBE_M, OSM_POI_FILE, SEARCH_M, PoiIndex
 from .zones import build_child_zone, map1000_edges, zone_evidence
 
 
@@ -43,6 +44,7 @@ class MapData:
     taxi_stands: list = field(default_factory=list)      # [(좌표, 설명)] 서울시 택시승차대. None이면 자료 없음
     lines_2023: dict = None                              # {선 코드: [2023 목록에도 있는지]} lines와 같은 순서. None이면 2023 목록 없음
     police_zones: list = None                            # [(면, 시설 이름)] 경찰청 어린이보호구역 지정 경계. None이면 자료 없음
+    poi_index: object = None
     map1000: object = None                               # Map1000 (1:1000 수치지형도 도로중심선·차도·보도). None이면 자료 없음
 
 
@@ -219,9 +221,8 @@ def _intersection_area_map1000(source, moct_points):
     둥근 모퉁이는 네모 모서리 바로 바깥이라 '가장자리 5m' 판정으로 덮습니다.
     4) 같은 도로가 30° 넘게 꺾이는 '도로의 모퉁이'도 꺾이기 전·후 띠가 겹치는 부분을 면으로 넣습니다.
     띠를 겹친 근사값이라 비스듬하거나 폭이 바뀌는 교차로에서는 몇 m 어긋날 수 있습니다.
-    반환: (교차로 면, 교차로 위치 목록)
+    반환: (교차로 면, 교차로·모퉁이 좌표 목록, 교차로 이름과 점 목록)
     """
-    from shapely.geometry import Point
 
     def key(index):
         name = source.lines[index][3]
@@ -362,7 +363,13 @@ def _intersection_area_map1000(source, moct_points):
         clipped = core.intersection(source.carriageway.buffer(CLIP_TOLERANCE_M))
         pieces.append(clipped if clipped.area >= CLIP_KEEP_RATIO * core.area else core)
     area = shapely.union_all(pieces) if pieces else None
-    return area, [(point.x, point.y) for point, _ in nodes] + [(point.x, point.y) for point, _, _ in corners]
+    named_nodes = []
+    for point, indices in nodes:
+        names = sorted({source.lines[i][3].strip() for i in indices if source.lines[i][3].strip()})
+        if names:
+            named_nodes.append((" · ".join(names) + " 교차로", point))
+    locations = [(point.x, point.y) for point, _ in nodes] + [(point.x, point.y) for point, _, _ in corners]
+    return area, locations, named_nodes
 
 
 ZONE_API_FILE = "child_protection_zones.json"       # 전국어린이보호구역표준데이터 API (pudo download)
@@ -474,10 +481,115 @@ BUS_STOP_FILE = "seoul_bus_stops.geojson"   # 서울시 버스정류소 위치�
 
 
 def _bus_stops(data_dir, layers):
-    """버스정류장 미터 좌표. 최신 서울시 파일이 있으면 그것, 없으면 1주차 스냅샷(layers_gangnam.json, 일부 누락 있음)."""
+    """버스정류장 (미터 좌표, 속성). 최신 서울시 파일이 있으면 그것, 없으면 1주차 스냅샷(layers_gangnam.json, 일부 누락 있음)."""
     path = Path(data_dir) / BUS_STOP_FILE
     features = read_json(path)["features"] if path.is_file() else layers["C 버스정류소"]["features"]
-    return [to_meters(*feature["geometry"]["coordinates"]) for feature in features]
+    return [(to_meters(*feature["geometry"]["coordinates"]), feature.get("properties", {})) for feature in features]
+
+
+SBIZ_DIR = "raw/sbiz"
+SBIZ_SEOUL_CSV = "소상공인시장진흥공단_상가(상권)정보_서울_*.csv"
+
+
+def _shop_anchors(folder):
+    """최신 서울 상가 CSV에서 강남역 반경 안의 점포를 읽습니다."""
+    path = max(folder.glob(SBIZ_SEOUL_CSV), default=None)
+    if path is None:
+        return
+    with path.open(encoding="utf-8-sig", newline="") as stream:
+        rows = csv.DictReader(stream)
+        if not {"상호명", "경도", "위도"}.issubset(rows.fieldnames or ()):
+            raise ValueError(f"상가 CSV에 상호명·경도·위도 열이 필요합니다: {path}")
+        for row in rows:
+            name = (row["상호명"] or "").strip()
+            if not name:
+                continue
+            try:
+                xy = to_meters(float(row["경도"]), float(row["위도"]))
+            except (ValueError, TypeError):
+                continue
+            if not math.hypot(*xy) <= RADIUS_M:
+                continue
+            branch = (row.get("지점명") or "").strip()
+            if branch and branch not in name:
+                name = f"{name} {branch}"
+            yield name, Point(xy), {
+                "kind": "shop",
+                "address": (row.get("도로명주소") or "").strip(),
+                "floor": (row.get("층정보") or "").strip(),
+            }
+
+
+JUSO_DIR = "raw/juso"
+JUSO_LAYERS = ("TL_SPBD_ENTRC", "TL_SPBD_BULD", "TL_SPRD_MANAGE")
+
+
+def _juso_anchors(folder):
+    """도로명주소 전자지도 출입구(EPSG:5179)에 건물명과 도로명주소를 붙입니다."""
+    import shapefile
+    from pyproj import Transformer
+
+    to_wgs84 = Transformer.from_crs(5179, 4326, always_xy=True)
+    roads = {}
+    for path in sorted(folder.rglob("TL_SPRD_MANAGE.dbf")):
+        with shapefile.Reader(dbf=str(path), encoding="cp949") as reader:
+            roads.update({(row["SIG_CD"], row["RN_CD"]): row["RN"].strip() for row in reader.iterRecords()})
+    for path in sorted(folder.rglob("TL_SPBD_ENTRC.shp")):
+        buildings_path = path.with_name("TL_SPBD_BULD.dbf")
+        if not path.with_suffix(".dbf").is_file() or not buildings_path.is_file():
+            continue
+        with shapefile.Reader(dbf=str(buildings_path), encoding="cp949") as reader:
+            buildings = {(row["SIG_CD"], row["BUL_MAN_NO"]): row for row in reader.iterRecords()}
+        with shapefile.Reader(str(path), encoding="cp949") as reader:
+            for item in reader.iterShapeRecords():
+                if not item.shape.points:
+                    continue
+                xy = to_meters(*to_wgs84.transform(*item.shape.points[0]))
+                if math.hypot(*xy) > RADIUS_M + SEARCH_M + CURB_PROBE_M:
+                    continue
+                row = item.record
+                building = buildings.get((row["SIG_CD"], row["BUL_MAN_NO"]))
+                if building is None:
+                    continue
+                point = Point(xy)
+                name = (building["BULD_NM"] or building["POS_BUL_NM"]).strip()
+                if name:
+                    yield 3, name, point
+                road = roads.get((building["RDS_SIG_CD"], building["RN_CD"]))
+                if road and building["BULD_MNNM"]:
+                    number = str(building["BULD_MNNM"])
+                    if building["BULD_SLNO"]:
+                        number += f"-{building['BULD_SLNO']}"
+                    yield 5, f"{road} {number}", point
+
+
+def _juso_building_boundaries(folder):
+    """이름이 있는 도로명주소 건물의 외곽선. 출입구가 등록되지 않은 건물도 포함합니다."""
+    import shapefile
+    from pyproj import Transformer
+
+    extent = RADIUS_M + CURB_PROBE_M + BUILDING_SIDE_M
+    to_source = Transformer.from_crs(4326, 5179, always_xy=True)
+    bbox = to_source.transform_bounds(*to_lonlat(-extent, -extent), *to_lonlat(extent, extent))
+    to_wgs84 = Transformer.from_crs(5179, 4326, always_xy=True)
+
+    def to_local(xy):
+        return np.column_stack(to_meters(*to_wgs84.transform(xy[:, 0], xy[:, 1])))
+
+    for path in sorted(folder.rglob("TL_SPBD_BULD.shp")):
+        if not path.with_suffix(".dbf").is_file():
+            continue
+        with shapefile.Reader(str(path), encoding="cp949") as reader:
+            for item in reader.iterShapeRecords(bbox=bbox, fields=["BULD_NM", "POS_BUL_NM"]):
+                name = item.record["BULD_NM"].strip() or item.record["POS_BUL_NM"].strip()
+                if not name or not item.shape.points:
+                    continue
+                # 단일 링은 원본의 방향과 관계없이 건물 외곽으로 해석합니다.
+                footprint = (Polygon(item.shape.points) if len(item.shape.parts) == 1
+                             else shape(item.shape.__geo_interface__))
+                for part in shapely.get_parts(shapely.make_valid(footprint)):
+                    if part.geom_type == "Polygon" and not part.is_empty:
+                        yield name, shapely.transform(part.exterior, to_local)
 
 
 LANE_2023_FILE = "tgis/lane_facilities_2023.xlsx"   # 서울시 차선시설물현황 (OA-15537 차선시설물현황_0724.xlsx, 2023-07)
@@ -600,14 +712,23 @@ def load_map_data(data_dir, sv_dir):
             child_zone_facility = build_child_zone(road_edges, facility_seeds, boundaries)
             evidence = evidence + facility_seeds
     # 교차로 면: 1:1000 도로선·차도 폭 + 표준노드 교차로 점. 1:1000이 없으면 교차로 면 없음(H1 자료 없음 → 확인 필요)
-    intersection_area, junctions = (_intersection_area_map1000(map1000, _moct_junctions(data_dir / MOCT_NODE_FILE))
-                                    if map1000 is not None else (None, []))
+    intersection_area, junctions, named_junctions = (_intersection_area_map1000(map1000, _moct_junctions(data_dir / MOCT_NODE_FILE))
+                                    if map1000 is not None else (None, [], []))
+    buses = _bus_stops(data_dir, layers)
+    poi_path = data_dir / OSM_POI_FILE
+    osm_pois = read_json(poi_path)["elements"] if poi_path.is_file() else []
     return MapData(
+        poi_index=(
+            PoiIndex(map1000, layers, buses, named_junctions, _juso_anchors(data_dir / JUSO_DIR), osm_pois,
+                     building_boundaries=_juso_building_boundaries(data_dir / JUSO_DIR),
+                     shops=_shop_anchors(data_dir / SBIZ_DIR))
+            if map1000 is not None else None
+        ),
         intersections=junctions,
         intersection_area=intersection_area,
         crosswalks=points("C 횡단보도"),
         hydrants=points("C 소화전"),
-        buses=_bus_stops(data_dir, layers),
+        buses=[position for position, _ in buses],
         schools=facilities,
         planned_roads=_planned_roads(data_dir / PLANNED_ROAD_FILE),
         child_zone=child_zone,

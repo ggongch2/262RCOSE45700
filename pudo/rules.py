@@ -230,6 +230,7 @@ def evaluate(m, *, thresholds=None, rules_off=(), photo=None, photo_min_confiden
     road = m["road"]
     properties = {
         "id": m["id"], "name": road["name"], "road_type": road["type"], "oneway": road["oneway"], "heading": m["heading"],
+        "poi_candidates": m.get("poi_candidates", []), "poi_fallback": m.get("poi_fallback"),
         "side": m["side"], "centerline": m["centerline"],
         "verdict": verdict, "score": score(road["type"]) if verdict == "가능" else None, "needs_check": bool(needs),
         "fail_reasons": fails, "check_reasons": needs, "checks": checks, "rules_off": sorted(off),

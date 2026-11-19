@@ -67,7 +67,7 @@ def data_script(result, *, thresholds=None, layers=None, rules_off=()):
     javascript = "const PUDO=" + json.dumps(result, ensure_ascii=False) + ";\n"
     javascript += "const PUDO_META=" + json.dumps(meta, ensure_ascii=False) + ";\n"
     javascript += "const PUDO_LAYERS=" + json.dumps(layers or {}, ensure_ascii=False) + ";\n"
-    return javascript
+    return javascript.replace("<", r"\u003c")
 
 
 def standalone_html(template_html, javascript):

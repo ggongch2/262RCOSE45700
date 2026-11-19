@@ -76,6 +76,16 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, 400)
         raised.exception.close()
 
+    def test_export_preserves_confirmed_poi_name_and_escapes_html(self):
+        id = self.app.measurements[0]["id"]
+        name = "현장 확인 </script>"
+        _, html = self.request("/api/export", {"poi_names": {id: name}})
+        raw_data = html.split("const PUDO=", 1)[1].split(";\nconst PUDO_META", 1)[0]
+        feature = json.loads(raw_data)["features"][0]
+        self.assertEqual(feature["properties"]["id"], id)
+        self.assertEqual(feature["properties"]["poi_name"], name)
+        self.assertNotIn("</script>", raw_data)
+
     def test_export_embeds_current_conditions(self):
         _, html = self.request("/api/export", {"thresholds": {"H4 소화전": 500}, "rules_off": ["A1"]})
         self.assertNotIn('<script src="pudo_v0_data.js"></script>', html)
