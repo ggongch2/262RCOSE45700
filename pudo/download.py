@@ -212,12 +212,7 @@ def fetch_roads(bbox):
 def fetch_poi(bbox):
     west, south, east, north = bbox
     bounds = f"({south},{west},{north},{east})"
-    query = (f'[out:json][timeout:40];'
-             f'(way["building"]["name"]{bounds};way["building"]["addr:housenumber"]{bounds};'
-             f'way["building"]["brand"]{bounds};)->.buildings;'
-             f'.buildings out geom;'
-             f'(node(w.buildings)["entrance"];node["entrance"]{bounds};'
-             f'node["railway"="subway_entrance"]{bounds};);out body;')
+    query = f'[out:json][timeout:40];node["railway"="subway_entrance"]{bounds};out body;'
     result = request_json(OVERPASS, {"data": query}, post=True)
     if result.get("remark") or not isinstance(result.get("elements"), list):
         raise DownloadError("OSM: POI 쿼리를 완료하지 못했습니다.")
@@ -316,6 +311,48 @@ def fetch_tgis(dataset, prefix, member, bbox):
     return result
 
 
+BUS_STOP_DATASET = "OA-15067"   # 서울시 버스정류소 위치정보 (매달 갱신 xlsx: NODE_ID, ARS_ID, 정류소명, X좌표, Y좌표, 정류소타입)
+
+
+def fetch_bus_stops(bbox):
+    """서울시 버스정류소 위치정보 최신 xlsx를 받아 bbox 안의 정류장만 GeoJSON으로 저장합니다."""
+    import tempfile
+
+    from .datasets import read_xlsx_rows
+
+    files, sequence = _seoul_file_list(BUS_STOP_DATASET)
+    newest = [(number, name) for number, name in files if name.startswith("서울시버스정류소위치정보(") and name.endswith(".xlsx")]
+    if not newest:
+        raise DownloadError(f"서울 열린데이터광장 {BUS_STOP_DATASET}: 정류소 xlsx가 없습니다.")
+    number, name = max(newest, key=lambda item: item[1])   # 파일 이름의 날짜(YYYYMMDD)가 가장 늦은 것
+    body = urllib.parse.urlencode({"infId": BUS_STOP_DATASET, "seqNo": "", "seq": number, "infSeq": sequence}).encode()
+    request = urllib.request.Request(SEOUL_FILE, data=body, headers={
+        "User-Agent": "Mozilla/5.0", "Referer": SEOUL_DATASET.format(BUS_STOP_DATASET)})
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            content = response.read()
+    except (urllib.error.URLError, TimeoutError, OSError) as error:
+        raise DownloadError(f"서울 열린데이터광장 {BUS_STOP_DATASET}: 파일 다운로드 실패 ({type(error).__name__})") from None
+    with tempfile.TemporaryDirectory() as temp:
+        path = Path(temp) / "stops.xlsx"
+        path.write_bytes(content)
+        rows = list(read_xlsx_rows(path))
+    features = []
+    for row in rows[1:]:
+        try:
+            lon, lat = float(row["D"]), float(row["E"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if bbox[0] <= lon <= bbox[2] and bbox[1] <= lat <= bbox[3]:
+            features.append({"type": "Feature", "geometry": {"type": "Point", "coordinates": [round(lon, 7), round(lat, 7)]},
+                             "properties": {"정류소": row.get("C"), "번호": str(row.get("B")), "타입": row.get("F"), "NODE_ID": str(row.get("A"))}})
+    if not features:
+        raise DownloadError(f"서울 열린데이터광장 {BUS_STOP_DATASET}: 조회 범위에 정류장이 없습니다.")
+    result = collection(features)
+    result["pudo_source"] = {"dataset": BUS_STOP_DATASET, "file": name}
+    return result
+
+
 def restore_layers(preview):
     text = Path(preview).read_text(encoding="utf-8")
     match = re.search(r"\bconst\s+DATA\s*=\s*", text)
@@ -367,6 +404,7 @@ def main(argv=None):
         ("hdmap/lt_l_b2surfacelinemark.geojson", "download", VWORLD_WFS, lambda: fetch_hdmap(key, "lt_l_b2surfacelinemark", bbox)),
         ("vworld_upis_roads_gangnam.geojson", "download", VWORLD_DATA, lambda: fetch_upis_roads(key, bbox)),
         ("vworld_moct_nodes_gangnam.geojson", "download", VWORLD_DATA, lambda: fetch_moct_nodes(key, bbox)),
+        ("seoul_bus_stops.geojson", "download", SEOUL_DATASET.format(BUS_STOP_DATASET), lambda: fetch_bus_stops(bbox)),
     ] + [
         (filename, "download", SEOUL_DATASET.format(dataset), lambda d=dataset, p=prefix, m=member: fetch_tgis(d, p, m, bbox))
         for filename, (dataset, prefix, member) in TGIS_LAYERS.items()

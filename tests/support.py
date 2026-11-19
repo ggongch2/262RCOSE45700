@@ -10,9 +10,10 @@ def judge(feature, data, *, thresholds=None, rules_off=(), photos=None, photo_mi
     return evaluate(m, thresholds=thresholds, rules_off=rules_off, photo=photo, photo_min_confidence=photo_min_confidence)
 
 
-def write_map1000(folder, reach=200):
+def write_map1000(folder, reach=200, island=False):
     """1:1000 수치지형도 축소판: 동서 '가로로'(도로폭 20m, 양쪽 보도 3m, 차로수 2)와
-    남북 '세로길'(도로폭 8m, 보도 없음, 차로수 1)이 판정 중심 (0,0)에서 만남. reach = 도로 반 길이(m)."""
+    남북 '세로길'(도로폭 8m, 보도 없음, 차로수 1)이 판정 중심 (0,0)에서 만남. reach = 도로 반 길이(m).
+    island=True면 가로로 서쪽 차도 가운데(y 2~4m)에 보도로 그려진 섬(중앙 버스승강장)을 둠."""
     import shapefile
     from pyproj import Transformer
     from pudo.config import CENTER_LAT, CENTER_LON
@@ -40,7 +41,8 @@ def write_map1000(folder, reach=200):
 
     for layer, rings in (("N1A_A0010000", [("B1", rect(-r, -10, r, 10), 0), ("B2", rect(-4, -r, 4, r), 0)]),
                          ("N1A_A0033320", [("S1", rect(-r, 7, -4, 10), 3), ("S2", rect(4, 7, r, 10), 3),
-                                           ("S3", rect(-r, -10, -4, -7), 3), ("S4", rect(4, -10, r, -7), 3)])):
+                                           ("S3", rect(-r, -10, -4, -7), 3), ("S4", rect(4, -10, r, -7), 3)]
+                                          + ([("S5", rect(-150, 2, -60, 4), 2)] if island else []))):
         with shapefile.Writer(str(sheet / layer), shapeType=shapefile.POLYGON, encoding="cp949") as w:
             w.field("UFID", "C", 40)
             w.field("폭", "N", 8, 2)

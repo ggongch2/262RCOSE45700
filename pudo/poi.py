@@ -1,11 +1,10 @@
-"""승하차 지점과 지도상 같은 보도로 연결되는 이름 기준점."""
+"""승하차 지점과 도로 중심선의 같은 쪽에 있는 이름 기준점."""
 import math
 import re
-from collections import defaultdict
 
 import shapely
-from shapely.geometry import LineString, Point, Polygon
-from shapely.ops import nearest_points
+from shapely.geometry import LineString, Point
+from shapely.ops import nearest_points, substring
 from shapely.strtree import STRtree
 
 from .geo import to_lonlat, to_meters
@@ -13,143 +12,175 @@ from .geo import to_lonlat, to_meters
 OSM_POI_FILE = "osm_poi_gangnam.json"
 SEARCH_M = 60
 CURB_PROBE_M = 4
+BUILDING_SIDE_M = 25  # 먼 건물까지 “옆”으로 안내하지 않도록 외곽선 검색 반경을 제한합니다.
+SHOP_SEARCH_M = 25
+SHOP_PRIORITY = 4
+STRUCTURE_PRIORITY = 7
+SIMILAR_DISTANCE_M = 5
 GEOMETRY_TOLERANCE_M = 0.05
-LARGE_BUILDING_M2 = 500
-CHAINS = {"스타벅스", "맥도날드", "버거킹", "롯데리아", "올리브영", "다이소",
-          "이디야커피", "메가MGC커피", "투썸플레이스", "파리바게뜨", "GS25", "CU", "세븐일레븐",
-          "Starbucks", "McDonald's", "Burger King", "Daiso", "7-Eleven"}
+CENTER_MATCH_M = 2
+LEGACY_CENTER_MATCH_M = 25
+CENTER_ANGLE_DEG = 30
 
 
-def _name(tags):
-    return tags.get("name:ko") or tags.get("name") or ""
-
-
-def _osm_anchors(elements):
-    buildings = defaultdict(list)
-    for way in elements:
-        tags = way.get("tags", {})
-        if way["type"] == "way":
-            geometry = way.get("geometry", ())
-            area = Polygon([to_meters(p["lon"], p["lat"]) for p in geometry]).area if len(geometry) >= 4 else 0
-            for node in way.get("nodes", ()):
-                buildings[node].append((tags, area))
-
+def _subway_anchors(elements):
     for node in elements:
-        if node["type"] != "node":
-            continue
         tags = node.get("tags", {})
-        point = Point(to_meters(node["lon"], node["lat"]))
-        if tags.get("access") in {"private", "no", "customers"} or tags.get("entrance") in {
-            "no", "exit", "service", "emergency", "garage",
-        }:
+        ref = tags.get("ref")
+        if (node["type"] != "node" or tags.get("railway") != "subway_entrance" or not ref
+                or tags.get("access") in {"private", "no", "customers"}
+                or tags.get("entrance") in {"no", "exit", "service", "emergency", "garage"}):
             continue
-        if tags.get("railway") == "subway_entrance" and tags.get("ref"):
-            label = next((label for label in (_name(tags), tags.get("description:ko", ""), tags.get("description", ""))
-                          if re.search(rf"(?<!\d){re.escape(tags['ref'])}\s*번\s*출구", label)), None)
-            station = tags.get("station") or _name(tags) or "지하철"
-            yield 1, label or f"{station} {tags['ref']}번 출구", point
-        elif tags.get("entrance"):
-            for place, area in [(tags, 0), *buildings[node["id"]]]:
-                name = _name(place)
-                brand = place.get("brand:ko") or place.get("brand")
-                if brand in CHAINS:
-                    yield 4, name or brand, point
-                elif name and (area >= LARGE_BUILDING_M2 or place.get("amenity") in {"hospital", "university", "library", "theatre"}
-                               or place.get("shop") == "mall"):
-                    yield 3, name, point
-                street, number = place.get("addr:street"), place.get("addr:housenumber")
-                if street and number:
-                    yield 5, f"{street} {number}", point
+        name = tags.get("name:ko") or tags.get("name") or ""
+        label = next((label for label in (name, tags.get("description:ko", ""), tags.get("description", ""))
+                      if re.search(rf"(?<!\d){re.escape(ref)}\s*번\s*출구", label)), None)
+        station = tags.get("station") or name or "지하철"
+        yield 1, label or f"{station} {ref}번 출구", Point(to_meters(node["lon"], node["lat"]))
 
 
-def _junctions(roads):
-    names_at = defaultdict(set)
-    points = {}
-    for way in roads:
-        tags = way.get("tags", {})
-        name = _name(tags)
-        if not name or tags.get("bridge") == "yes" or tags.get("tunnel") == "yes":
-            continue
-        for node, coord in zip(way.get("nodes", ()), way.get("geometry", ())):
-            names_at[node].add(name)
-            points[node] = Point(to_meters(coord["lon"], coord["lat"]))
-    for node, names in names_at.items():
-        if len(names) == 2:
-            yield 6, " · ".join(sorted(names)) + " 교차로", points[node]
-
-
-def _anchors(layers, roads, osm_elements):
-    yield from _osm_anchors(osm_elements)
-    yield from _junctions(roads)
-    for layer, priority, label in (("C 버스정류소", 2, "버스정류장"),
-                                   ("C 소화전", 7, "소화전"),
-                                   ("C 횡단보도", 7, "횡단보도")):
+def _anchors(layers, buses, junctions, buildings, osm_elements):
+    yield from _subway_anchors(osm_elements)
+    yield from buildings
+    for name, point in junctions:
+        yield 6, name, point
+    for position, props in buses:
+        if props.get("정류소"):
+            label = f"{props['정류소']} 버스정류장"
+            if props.get("번호"):
+                label += f" ({props['번호']})"
+            yield 2, label, Point(position)
+    for layer, label in (("C 소화전", "소화전"), ("C 횡단보도", "횡단보도")):
         for feature in layers[layer]["features"]:
             props = feature["properties"]
-            if priority == 2:
-                if not props.get("정류소"):
-                    continue
-                label_text = f"{props['정류소']} {label}"
-                if props.get("번호"):
-                    label_text += f" ({props['번호']})"
-            else:
-                detail = props.get("주소") or props.get("관리번호")
-                label_text = f"{detail} {label}" if detail else label
-            yield priority, label_text, Point(to_meters(*feature["geometry"]["coordinates"]))
+            detail = props.get("주소") or props.get("관리번호")
+            yield STRUCTURE_PRIORITY, f"{detail} {label}" if detail else label, Point(to_meters(*feature["geometry"]["coordinates"]))
+
+
+def _rank_options(options):
+    """가까운 후보부터 묶고, 거리 차가 작은 묶음 안에서 유형을 우선합니다."""
+    by_distance = sorted(options, key=lambda item: (item[0] == STRUCTURE_PRIORITY, item[1]))
+    group = []
+    for option in by_distance:
+        if group and (
+            (option[0] == STRUCTURE_PRIORITY) != (group[0][0] == STRUCTURE_PRIORITY)
+            or option[1] - group[0][1] > SIMILAR_DISTANCE_M
+        ):
+            yield from sorted(group, key=lambda item: item[:5])
+            group = []
+        group.append(option)
+    yield from sorted(group, key=lambda item: item[:5])
 
 
 class PoiIndex:
-    def __init__(self, source, layers, roads, osm_elements=()):
-        self.carriageway = source.carriageway
-        # 붙어 있는 보도 면은 합치되, 끊긴 구간이나 차도 위로 보도를 확장하지 않습니다.
+    def __init__(self, source, layers, buses, junctions=(), buildings=(), osm_elements=(), *, building_boundaries=(), shops=()):
+        self.source = source
         merged = shapely.union_all([area for area, _ in source.sidewalks])
         self.walks = list(shapely.get_parts(merged)) if not merged.is_empty else []
         self.walk_tree = STRtree(self.walks)
-        self.anchors = list(_anchors(layers, roads, osm_elements))
-        self.anchor_tree = STRtree([point for _, _, point in self.anchors])
+        self.anchors = [(priority, name, point, None)
+                        for priority, name, point in _anchors(layers, buses, junctions, buildings, osm_elements)]
+        self.anchors.extend((SHOP_PRIORITY, name, point, details) for name, point, details in shops)
+        self.anchor_tree = STRtree([point for _, _, point, _ in self.anchors])
+        self.building_boundaries = list(building_boundaries)
+        self.building_tree = STRtree([boundary for _, boundary in self.building_boundaries])
 
-    def suggest(self, position, heading):
+    def _curb(self, point, outward):
+        probe = LineString([point, (point.x + CURB_PROBE_M * outward[0], point.y + CURB_PROBE_M * outward[1])])
+        cuts = [probe.intersection(self.walks[i]) for i in self.walk_tree.query(probe, predicate="intersects")]
+        curb = min((nearest_points(point, cut)[1] for cut in cuts if cut.length), key=point.distance, default=None)
+        if curb is not None and not point.equals(curb):
+            if LineString([point, curb]).difference(self.source.carriageway).length > GEOMETRY_TOLERANCE_M:
+                return None
+        return curb
+
+    def _road(self, center, heading, max_distance):
+        road_direction = (heading + 90) % 180
+        matches = []
+        for index in self.source.line_tree.query(center.buffer(max_distance)):
+            line = self.source.lines[index][0]
+            distance = line.distance(center)
+            at = line.project(center)
+            a, b = line.interpolate(max(0, at - 2)), line.interpolate(min(line.length, at + 2))
+            direction = math.degrees(math.atan2(b.x - a.x, b.y - a.y)) % 180
+            diff = abs(direction - road_direction)
+            if distance <= max_distance and min(diff, 180 - diff) <= CENTER_ANGLE_DEG:
+                matches.append((distance, min(diff, 180 - diff), index))
+        return min(matches)[2] if matches else None
+
+    def _same_side(self, start, anchor, road_index, road_name):
+        link = LineString([start, anchor])
+        if link.length <= 2 * GEOMETRY_TOLERANCE_M:
+            return True
+        # 끝점은 허용하고, 도엽 경계에서 끊긴 같은 도로의 중심선도 검사합니다.
+        interior = substring(link, GEOMETRY_TOLERANCE_M, link.length - GEOMETRY_TOLERANCE_M)
+        return not any(i == road_index or (road_name and self.source.lines[i][3] == road_name)
+                       for i in self.source.line_tree.query(interior, predicate="intersects"))
+
+    def _building_side(self, origin, start, outward, road_index, road_name):
+        options = []
+        for idx in self.building_tree.query(origin.buffer(BUILDING_SIDE_M).envelope):
+            name, boundary = self.building_boundaries[idx]
+            anchor = nearest_points(origin, boundary)[1]
+            distance = origin.distance(anchor)
+            dx, dy = anchor.x - origin.x, anchor.y - origin.y
+            if distance > BUILDING_SIDE_M or dx * outward[0] + dy * outward[1] <= 0:
+                continue
+            if self._same_side(start, anchor, road_index, road_name):
+                options.append((3, distance, name, anchor.x, anchor.y, {"kind": "building_side"}))
+        return min(options, default=None)
+
+    def suggest(self, position, heading, centerline=None):
         point = Point(position)
         angle = math.radians(heading)
-        probe = LineString([position, (point.x + CURB_PROBE_M * math.sin(angle),
-                                       point.y + CURB_PROBE_M * math.cos(angle))])
-        entries = []
-        for index in self.walk_tree.query(probe, predicate="intersects"):
-            cut = probe.intersection(self.walks[index])
-            if cut.length:
-                entries.append((point.distance(cut), index))
-        if not entries:
-            return [], None
-        _, index = min(entries)
-        walk = self.walks[index]
-        curb = nearest_points(point, probe.intersection(walk))[1]
-        inner_probe = LineString([point, curb])
-        # 후보에서 보도까지 짧게 차도 가장자리를 지나는 구간도 중간에 끊기면 배제합니다.
-        if not point.equals(curb) and not self.carriageway.covers(inner_probe):
-            if inner_probe.difference(self.carriageway).length > GEOMETRY_TOLERANCE_M:
-                return [], None
+        outward = math.sin(angle), math.cos(angle)
+        curb = self._curb(point, outward)
+        fallback = None
+        if curb is not None:
+            fallback = {"name": "승하차 지점 옆 보도", "distance_m": round(point.distance(curb), 1),
+                        "bearing": round((heading + 180) % 360),
+                        "coordinates": to_lonlat(curb.x, curb.y), "curb": to_lonlat(point.x, point.y)}
 
+        center = Point(centerline) if centerline is not None else point
+        road_index = self._road(center, heading, CENTER_MATCH_M if centerline is not None else LEGACY_CENTER_MATCH_M)
+        if road_index is None:
+            return [], fallback
+
+        road, _, _, road_name, _ = self.source.lines[road_index]
+        start = point
+        if road.distance(point) <= GEOMETRY_TOLERANCE_M:
+            # 좁은 도로에서는 후보와 중심점이 같을 수 있어 후보의 바깥 방향에서 검사합니다.
+            start = Point(point.x + 2 * GEOMETRY_TOLERANCE_M * outward[0],
+                          point.y + 2 * GEOMETRY_TOLERANCE_M * outward[1])
+        origin = curb if curb is not None else point
         options = []
-        for idx in self.anchor_tree.query(curb.buffer(SEARCH_M)):
-            priority, name, anchor = self.anchors[idx]
-            if priority == 6:
-                # 노드는 교차로 중앙에 있으므로 인접한 현재 보도 모서리의 위치로 표시합니다.
-                nearest = nearest_points(anchor, walk)[1]
-                if anchor.distance(nearest) > 20:
+        for idx in self.anchor_tree.query(origin.buffer(SEARCH_M)):
+            priority, name, anchor, details = self.anchors[idx]
+            distance = origin.distance(anchor)
+            if distance > SEARCH_M:
+                continue
+            if priority == SHOP_PRIORITY:
+                dx, dy = anchor.x - origin.x, anchor.y - origin.y
+                if distance > SHOP_SEARCH_M or dx * outward[0] + dy * outward[1] <= 0:
                     continue
-                anchor = nearest
-            distance = curb.distance(anchor)
-            if distance > SEARCH_M or not walk.covers(anchor):
-                continue
-            if distance and LineString([curb, anchor]).difference(walk).length > GEOMETRY_TOLERANCE_M:
-                continue
-            options.append((priority, distance, name, anchor.x, anchor.y))
-        options.sort()
+            if self._same_side(start, anchor, road_index, road_name):
+                options.append((priority, distance, name, anchor.x, anchor.y, details))
+        building_side = self._building_side(origin, start, outward, road_index, road_name)
+        if building_side:
+            options.append(building_side)
         unique = {}
-        for priority, distance, name, x, y in options:
-            unique.setdefault(name, {"name": name, "priority": priority, "distance_m": round(distance, 1),
-                                     "coordinates": to_lonlat(x, y), "curb": to_lonlat(curb.x, curb.y)})
-        fallback = {"name": "승하차 지점 옆 보도", "distance_m": round(point.distance(curb), 1),
-                    "bearing": round((heading + 180) % 360),
-                    "coordinates": to_lonlat(curb.x, curb.y), "curb": to_lonlat(point.x, point.y)}
+        shop_added = False
+        for priority, distance, name, x, y, details in _rank_options(options):
+            is_shop = priority == SHOP_PRIORITY
+            if name in unique or (is_shop and shop_added):
+                continue
+            is_building_side = details and details["kind"] == "building_side"
+            label = f"{name} 옆" if is_building_side else name
+            if is_building_side and road_name:
+                label += f" · {road_name}"
+            item = {"name": label, "priority": priority, "distance_m": round(distance, 1),
+                    "coordinates": to_lonlat(x, y), "curb": to_lonlat(origin.x, origin.y)}
+            if details:
+                item.update(details)
+            unique[name] = item
+            shop_added |= is_shop
         return list(unique.values())[:5], fallback

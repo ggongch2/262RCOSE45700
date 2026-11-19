@@ -249,5 +249,19 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(json.loads(output.read_text()), collection())
 
 
+class BusStopSourceTests(unittest.TestCase):
+    def test_latest_seoul_bus_stop_file_replaces_the_week1_snapshot(self):
+        from pudo.datasets import _bus_stops
+        from pudo.config import CENTER_LAT, CENTER_LON
+        layers = {"C 버스정류소": {"features": [{"geometry": {"coordinates": [CENTER_LON, CENTER_LAT]}}]}}
+        with tempfile.TemporaryDirectory() as temp:
+            data = Path(temp)
+            self.assertEqual(len(_bus_stops(data, layers)), 1)          # 최신 파일이 없으면 스냅샷
+            (data / "seoul_bus_stops.geojson").write_text(json.dumps({"type": "FeatureCollection", "features": [
+                {"type": "Feature", "geometry": {"type": "Point", "coordinates": [CENTER_LON + 0.001 * i, CENTER_LAT]},
+                 "properties": {}} for i in range(3)]}))
+            self.assertEqual(len(_bus_stops(data, layers)), 3)          # 있으면 최신 파일만
+
+
 if __name__ == "__main__":
     unittest.main()

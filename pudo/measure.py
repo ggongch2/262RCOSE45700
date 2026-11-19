@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import DATA_DIR, SV_DIR
+from .datasets import JUSO_DIR, JUSO_LAYERS, SBIZ_DIR, SBIZ_SEOUL_CSV
 from .geo import distance_to_area, distance_to_lines, distance_to_points, distance_to_segment, distance_to_segments, to_meters
 
 SCHEMA_VERSION = "pudo-measure.v5"
@@ -245,7 +246,10 @@ def measure(feature, data):
     d_intersection = distance_to_area(p, data.intersection_area)
     hd_covered = (d := distance_to_segments(p, data.hd_link)) is not None and d <= HD_COVER_M
     lanes_known = pr.get("lanes_source") in LANE_SOURCE
-    poi_candidates, poi_fallback = data.poi_index.suggest(p, pr["heading"]) if data.poi_index is not None else ([], None)
+    poi_candidates, poi_fallback = [], None
+    if data.poi_index is not None:
+        center = to_meters(*pr["centerline"]) if pr.get("centerline") else None
+        poi_candidates, poi_fallback = data.poi_index.suggest(p, pr["heading"], center)
     return {
         "id": pr["id"], "coordinates": feature["geometry"]["coordinates"], "heading": pr["heading"],
         "side": pr.get("side"), "centerline": pr.get("centerline"),
@@ -298,10 +302,16 @@ def _input_files(data_dir, sv_dir):
              "child_protection_zones.csv", "vworld_upis_roads_gangnam.geojson", "hdmap/lt_l_a2link.geojson",
              "hdmap/lt_l_b2surfacelinemark.geojson", "tgis/A064_P_signs.geojson", "tgis/A054_P_text_marks.geojson",
              "taxi_stands.xlsx", "tgis/lane_facilities_2023.xlsx", "child_zones_police.json",
-             "vworld_moct_nodes_gangnam.geojson", "osm_poi_gangnam.json"]
+             "vworld_moct_nodes_gangnam.geojson", "seoul_bus_stops.geojson", "osm_poi_gangnam.json"]
     files = [data_dir / name for name in names] + [Path(sv_dir) / "metadata.csv"]
     # 압축을 풀면 shp는 원본 날짜(2025년)를 유지하므로 폴더 자체의 날짜도 봅니다.
     files += [data_dir / "map1000", *sorted((data_dir / "map1000").glob("*/*.shp"))] if (data_dir / "map1000").is_dir() else []
+    juso = data_dir / JUSO_DIR
+    if juso.is_dir():
+        files.extend([juso, *(path for path in juso.rglob("*") if path.is_dir()
+                              or (path.stem in JUSO_LAYERS and path.suffix in {".shp", ".shx", ".dbf"}))])
+    sbiz = data_dir / SBIZ_DIR
+    files.extend([sbiz, *sbiz.glob(SBIZ_SEOUL_CSV)])
     return [path for path in files if path.exists()]
 
 

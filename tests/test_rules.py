@@ -459,16 +459,24 @@ class Map1000IntersectionTests(unittest.TestCase):
 
     def test_crossing_bands_make_intersection_box(self):
         from pudo.datasets import _intersection_area_map1000
-        area, nodes = _intersection_area_map1000(self.cross(), [])
+        area, nodes, _ = _intersection_area_map1000(self.cross(), [])
         self.assertEqual(len(nodes), 1)
         self.assertAlmostEqual(area.area, 20 * 10, delta=5)            # 가로 차도 20m x 세로 차도 10m
         self.assertTrue(area.contains(Point(0, 0)))
         self.assertFalse(area.contains(Point(0, 20)))
 
+    def test_intersection_names_use_all_meeting_roads(self):
+        from pudo.datasets import Map1000, _intersection_area_map1000
+        cross = self.cross()
+        lines = cross.lines + [(LineString([(0, 0), (40, 40)]), 1, False, "대각길", 6.0)]
+        source = Map1000(lines, cross.carriageway, [])
+        _, _, named = _intersection_area_map1000(source, [])
+        self.assertEqual(named, [("가로 · 대각길 · 세로 교차로", Point(0, 0))])
+
     def test_straight_split_of_same_road_is_not_an_intersection(self):
         from pudo.datasets import Map1000, _intersection_area_map1000
         lines = [(LineString([(-60, 0), (0, 0)]), 2, False, "", 8.0), (LineString([(0, 0), (60, 0)]), 2, False, "", 8.0)]
-        area, nodes = _intersection_area_map1000(Map1000(lines=lines, carriageway=box(-60, -4, 60, 4), sidewalks=[]), [])
+        area, nodes, _ = _intersection_area_map1000(Map1000(lines=lines, carriageway=box(-60, -4, 60, 4), sidewalks=[]), [])
         self.assertEqual(nodes, [])
         self.assertIsNone(area)
 
@@ -477,7 +485,7 @@ class Map1000IntersectionTests(unittest.TestCase):
         from pudo.datasets import Map1000, _intersection_area_map1000
         bend = LineString([(-60, 0), (0, 0), (0, 60)])
         lines = [(bend, 1, False, "꺾인길", 6.0)]
-        area, nodes = _intersection_area_map1000(Map1000(lines=lines, carriageway=box(-60, -3, 3, 3).union(box(-3, -3, 3, 60)), sidewalks=[]), [])
+        area, nodes, _ = _intersection_area_map1000(Map1000(lines=lines, carriageway=box(-60, -3, 3, 3).union(box(-3, -3, 3, 60)), sidewalks=[]), [])
         self.assertEqual([(round(x), round(y)) for x, y in nodes], [(0, 0)])
         self.assertTrue(area.contains(Point(0, 0)))
         self.assertAlmostEqual(area.area, 36, delta=4)                  # 반폭 3m씩 연장한 두 띠의 겹침 6m x 6m
@@ -487,7 +495,7 @@ class Map1000IntersectionTests(unittest.TestCase):
         from pudo.datasets import Map1000, _intersection_area_map1000
         lines = [(LineString([(-60, 0), (0, 0)]), 1, False, "골목길", 6.0), (LineString([(0, 0), (60, 0)]), 1, False, "골목길", 6.0),
                  (LineString([(0, 0), (0, 60)]), 1, False, "골목길", 6.0)]
-        area, nodes = _intersection_area_map1000(Map1000(lines=lines, carriageway=box(-60, -3, 60, 3).union(box(-3, 0, 3, 60)), sidewalks=[]), [])
+        area, nodes, _ = _intersection_area_map1000(Map1000(lines=lines, carriageway=box(-60, -3, 60, 3).union(box(-3, 0, 3, 60)), sidewalks=[]), [])
         self.assertEqual([(round(x), round(y)) for x, y in nodes], [(0, 0)])
         self.assertTrue(area.contains(Point(0, 1)))
 

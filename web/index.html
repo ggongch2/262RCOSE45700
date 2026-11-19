@@ -70,7 +70,7 @@
   <header>
     <strong>PUDO 후보 v0 · 강남역 500m</strong>
     <label>판정 <select id="fVerdict"><option value="">전체</option><option>가능</option><option>확인 필요</option><option>불가</option><option value="풀림">규칙 해제로 가능이 된 곳</option></select></label>
-    <label>도로 <select id="fRoad"><option value="">전체</option><option value="primary">대로</option><option value="tertiary">보조간선</option><option value="residential">이면도로</option><option value="service">골목·단지</option></select></label>
+    <label>도로 <select id="fRoad"><option value="">전체</option><option>대로</option><option>로</option><option>길</option></select></label>
     <label>사유 <select id="fReason"><option value="">전체</option></select></label>
     <span class="sum" id="sum"></span>
     <button id="btnExport">GeoJSON 내보내기</button>
@@ -90,7 +90,7 @@ const LAYERS = (typeof PUDO_LAYERS === 'object' && PUDO_LAYERS) || {};
 const COLOR = {"가능":"#1a9850","확인 필요":"#f39c12","불가":"#d73027"};
 const PILL = {"가능":"ok","확인 필요":"chk","불가":"ng"};
 const REASONS = {H1:'H1 교차로', H2:'H2 횡단보도', H3:'H3 정류장', H4:'H4 소화전', H5:'H5 규제선·전용차로', H6:'H6 어린이보호구역', H7:'H7 안전지대', H8:'H8 택시승강장', P1:'P1 통과 폭·차로', A1:'A1 보도', A2:'A2 사진 판독'};
-const ROAD = {primary:'대로', primary_link:'대로 연결로', tertiary:'보조간선', residential:'이면도로', service:'골목·단지'};
+const ROAD = {};   // 도로 유형 = 1:1000 도로명 끝 글자(대로·로·길) 그대로 표시
 const $ = (id) => document.getElementById(id);
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const RULES = {H1:'교차로', H2:'횡단보도', H3:'정류장', H4:'소화전', H5:'규제선·전용차로', H6:'어린이보호구역', H7:'안전지대', H8:'택시승강장', P1:'통과 폭·차로', A1:'보도', A2:'차도 끝 접근 막힘(사진)', V0:'사진 대응'};
@@ -120,7 +120,7 @@ try { poiNames = JSON.parse(localStorage.getItem('pudo_poi_names') || '{}') || {
 const poiKey = (f) => [f.properties.id, ...f.geometry.coordinates].join(',');
 const poiName = (f) => poiNames[poiKey(f)] ?? f.properties.poi_name ?? '';
 const displayName = (f) => poiName(f) || f.properties.id;
-const POI_TYPES = {1:'지하철 출구', 2:'버스정류장', 3:'건물·시설 출입구', 4:'브랜드 출입구',
+const POI_TYPES = {1:'지하철 출구', 2:'버스정류장', 3:'건물·시설 출입구', 4:'상가 · 현장 확인 필요',
   5:'도로명 주소 출입구', 6:'교차로 모서리', 7:'구조물'};
 
 // 지도: CARTO는 키 없는 요청에 'API KEY REQUIRED' 타일을, OSM은 file://(Referer 없음)에 'Access blocked' 타일을 돌려줍니다.
@@ -222,7 +222,7 @@ function filtered() {
   const v = $('fVerdict').value, r = $('fRoad').value, why = $('fReason').value;
   return PUDO.features.filter(f => { const p = f.properties;
     if (v === '풀림' ? !released(p) : (v && V(p) !== v)) return false;
-    if (r && !(p.road_type === r || (r === 'primary' && p.road_type === 'primary_link'))) return false;
+    if (r && p.road_type !== r) return false;
     if (why && ![...FR(p), ...CR(p)].some(x => code(x) === why)) return false;
     return true; });
 }
@@ -311,11 +311,11 @@ function poiDetails(f) {
   const useCode = !current && (!candidates.length || poiNames[poiKey(f)] === '');
   const useManual = current && !candidates.some(candidate => candidate.name === current);
   const choices = candidates.map((candidate, i) => `<option value="${i}" ${candidate.name === current ? 'selected' : ''}>
-    ${i + 1}순위 · ${esc(candidate.name)} (${esc(POI_TYPES[candidate.priority])}, ${esc(candidate.distance_m)}m)</option>`).join('');
+    ${i + 1}순위 · ${esc(candidate.name)} (${esc(candidate.kind === "building_side" ? "건물 외곽" : POI_TYPES[candidate.priority])}, ${esc(candidate.distance_m)}m)</option>`).join('');
   const fallback = candidates.length ? '지점 코드로 되돌리기' : '지점 코드 · 로드뷰로 현장 확인';
   return `<h3>POI명 설정</h3>
-    <div class="muted">${candidates.length ? '지도상 같은 보도에서 이어지는 기준점입니다. 저장 전에 로드뷰에서 실제 출입구를 확인하세요.'
-      : '같은 보도에서 접근할 수 있는 기준점이 지도에서 확인되지 않았습니다.'}</div>
+    <div class="muted">${candidates.length ? '지도상 같은 도로 쪽에 있는 기준점입니다. 저장 전에 로드뷰에서 탑승 위치와 기준점을 확인하세요.'
+      : '같은 도로 쪽의 기준점이 지도에서 확인되지 않았습니다.'}</div>
     <div class="btns"><select id="poiChoice" aria-label="POI명 후보" style="max-width:100%">
       <option value="" disabled ${!current && !useCode ? 'selected' : ''}>POI명 후보 선택</option>${choices}
       <option value="code" ${useCode ? 'selected' : ''}>${fallback}</option>
@@ -325,6 +325,7 @@ function poiDetails(f) {
       <input id="poiManualName" aria-label="현장에서 확인한 기준점 이름" maxlength="100" value="${esc(useManual ? current : '')}">
       <label><input id="poiConfirmed" type="checkbox">${useManual ? '같은 보도로 접근 가능함을 다시 확인했습니다.' : '같은 보도로 접근 가능함을 확인했습니다.'}</label>
     </div>
+    <label id="poiShopCheck" hidden><input id="poiShopConfirmed" type="checkbox"> 이 도로 쪽에서 점포의 간판이나 출입구를 확인했습니다.</label>
     <div class="muted" id="poiEvidence"></div>
     <div class="muted" id="poiStatus" role="status"></div>`;
 }
@@ -359,9 +360,16 @@ function show(f) {
     const candidate = candidates[choice];
     const fallback = choice === 'code' ? p.poi_fallback : null;
     $('poiManual').hidden = choice !== 'manual';
-    $('poiSave').disabled = !choice || (choice === 'manual' && (!$('poiManualName').value.trim() || !$('poiConfirmed').checked));
+    const shop = candidate?.kind === 'shop';
+    $('poiShopCheck').hidden = !shop;
+    $('poiSave').disabled = !choice || (shop && !$('poiShopConfirmed').checked)
+      || (choice === 'manual' && (!$('poiManualName').value.trim() || !$('poiConfirmed').checked));
     $('poiEvidence').textContent = candidate
-      ? `기준점 → 승하차 보도까지 ${candidate.distance_m}m · 파란 점은 기준점, 점선은 보도 연결 구간`
+      ? (candidate.kind === 'building_side'
+        ? `건물 외곽까지 직선 ${candidate.distance_m}m · 파란 점은 건물 외곽 기준점`
+        : candidate.kind === 'shop'
+          ? [candidate.address, candidate.floor && `층 정보 ${candidate.floor}`, `점포 좌표까지 직선 ${candidate.distance_m}m`].filter(Boolean).join(' · ')
+          : `기준점까지 직선 ${candidate.distance_m}m · 파란 점은 기준점`)
       : choice === 'code' ? (fallback
         ? `${p.id} · 위 로드뷰 참조 · 옆 보도에서 승하차 지점까지 ${fallback.distance_m}m · 방위 ${fallback.bearing}°`
         : `${p.id} · 위 로드뷰 참조 · 승하차 지점에서 보도 방향 ${p.heading}° · 기준점 거리 미확인`) : '';
@@ -373,7 +381,11 @@ function show(f) {
     }
     previewPoi(candidate || fallback);
   };
-  $('poiChoice').onchange = updatePoi;
+  $('poiChoice').onchange = () => {
+    $('poiShopConfirmed').checked = false;
+    updatePoi();
+  };
+  $('poiShopConfirmed').onchange = updatePoi;
   $('poiManualName').oninput = updatePoi;
   $('poiConfirmed').onchange = updatePoi;
   $('poiSave').onclick = () => {

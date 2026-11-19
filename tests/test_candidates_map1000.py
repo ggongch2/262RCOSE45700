@@ -40,8 +40,27 @@ class Map1000CandidateTests(unittest.TestCase):
             x, y = to_meters(*f["geometry"]["coordinates"])
             self.assertFalse(abs(x) < 4 and abs(y) < 7, (x, y))              # 두 차도가 겹치는 교차로 안에는 없음
 
-    def test_without_osm_road_type_comes_from_name(self):
-        self.assertTrue(all(p["road_type"] == "residential" and p["osm_way"] is None for p in self.props))
+    def test_road_type_comes_from_the_1000_road_name(self):
+        self.assertTrue(all(p["osm_way"] is None for p in self.props))
+        self.assertEqual({p["road_type"] for p in self.props if p["name"] == "가로로"}, {"로"})
+
+    def test_road_class_by_name_suffix(self):
+        self.assertEqual([candidates.road_class(n) for n in ("강남대로", "테헤란로", "강남대로94길", "", None)],
+                         ["대로", "로", "길", "이름 없음", "이름 없음"])
+
+
+class Map1000IslandTests(unittest.TestCase):
+    def test_candidate_skips_a_sidewalk_island_in_the_middle_of_the_road(self):
+        # 강남대로 중앙 버스승강장처럼 사방이 차도인 보도 면은 차도 끝이 아님 → 바깥 차도 끝(7m)에 후보
+        with tempfile.TemporaryDirectory() as temp:
+            data = Path(temp)
+            write_map1000(data / "map1000", island=True)
+            features, _ = candidates._from_map1000(data / "map1000", data / "osm_roads_gangnam.json")
+        beside = [f["properties"] for f in features if f["properties"]["name"] == "가로로"
+                  and -140 < to_meters(*f["geometry"]["coordinates"])[0] < -70 and to_meters(*f["geometry"]["coordinates"])[1] > 0]
+        self.assertTrue(beside)
+        for p in beside:
+            self.assertAlmostEqual(p["curb_offset_m"], 7 - 1.5, delta=0.2)
 
 
 if __name__ == "__main__":

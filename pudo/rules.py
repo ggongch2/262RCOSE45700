@@ -208,8 +208,8 @@ def _checks(m, th):
 
 
 def score(road_type):
-    """가능 지점의 적합도. 잔여차로 1, 보도 1, 간섭(이면도로 1 / 대로 0)의 평균."""
-    interf = {"primary": 0.0, "primary_link": 0.0, "secondary": 0.3, "tertiary": 0.5}.get(road_type, 1.0)
+    """가능 지점의 적합도. 잔여차로 1, 보도 1, 간섭(길 1 / 로 0.5 / 대로 0)의 평균. 도로 유형은 1:1000 도로명 끝 글자."""
+    interf = {"대로": 0.0, "로": 0.5}.get(road_type, 1.0)
     return round((1.0 + 1.0 + interf) / 3, 2)
 
 
