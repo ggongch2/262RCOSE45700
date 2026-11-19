@@ -59,6 +59,9 @@
   .thgrid input { width:64px; font:inherit; font-size:12.5px; padding:1px 4px; }
   .thgrid input.changed { border:2px solid var(--accent); }
   #busy { font-size:12px; color:var(--accent); }
+  .idlabel { background:#fff; border:1px solid #555; border-radius:3px; padding:0 3px; font-size:11px; font-weight:600; white-space:nowrap; box-shadow:none; }
+  .idlabel.hit { background:#fff6c2; border:2px solid #000; font-size:13px; }
+  #fFind.miss { border:2px solid var(--ng); }
   @media (max-width: 860px) {
     #app { grid-template-columns:1fr; grid-template-rows:auto 55vh auto; }
     #side { border-left:0; border-top:1px solid var(--line); }
@@ -69,6 +72,7 @@
 <div id="app">
   <header>
     <strong>PUDO 후보 v0 · 강남역 500m</strong>
+    <label title="번호만 쳐도 됩니다. 여러 개는 쉼표로 (예: 403, 404, 732). Enter로 찾기. 주소창 #P0732 링크로도 열림">후보 찾기 <input id="fFind" placeholder="732 또는 403,404" size="14"></label>
     <label>판정 <select id="fVerdict"><option value="">전체</option><option>가능</option><option>확인 필요</option><option>불가</option><option value="풀림">규칙 해제로 가능이 된 곳</option></select></label>
     <label>도로 <select id="fRoad"><option value="">전체</option><option>대로</option><option>로</option><option>길</option></select></label>
     <label>사유 <select id="fReason"><option value="">전체</option></select></label>
@@ -241,6 +245,7 @@ function draw() {
     + (off.size ? ` <span class="pill new">해제로 가능 +${freed}</span>` : '');
   overview(fs);
   if (selected) { if (selectedRing) selectedRing.bringToFront(); }
+  if (typeof drawLabels === 'function') drawLabels();
 }
 
 function bars(counts, total, cls) {
@@ -285,6 +290,42 @@ function focusId(id) {
   map.setView([lat, lon], Math.max(map.getZoom(), 18));
   show(f);
 }
+
+// 후보 찾기: "732", "P0732", "403, 404" → 지도 이동 + 번호표 고정. 주소창 #P0732,P0403 도 같은 동작.
+let findLayer = L.layerGroup().addTo(map);
+const normId = (s) => { s = s.trim().toUpperCase().replace(/^P/, ''); return /^\d+$/.test(s) ? 'P' + s.padStart(4, '0') : null; };
+function findIds(text) {
+  const ids = text.split(/[\s,]+/).map(normId).filter(Boolean);
+  const found = ids.filter(id => byId.has(id));
+  findLayer.clearLayers();
+  $('fFind').classList.toggle('miss', ids.length > 0 && found.length < ids.length);
+  if (!found.length) return;
+  const pts = found.map(id => { const [lon, lat] = byId.get(id).geometry.coordinates; return [lat, lon]; });
+  found.forEach((id, i) => {
+    L.circleMarker(pts[i], {radius:14, color:'#000', weight:3, fill:false, interactive:false}).addTo(findLayer);
+    L.tooltip({permanent:true, direction:'top', offset:[0, -12], className:'idlabel hit', interactive:false})
+      .setLatLng(pts[i]).setContent(id).addTo(findLayer);
+  });
+  if (found.length === 1) focusId(found[0]);
+  else map.fitBounds(L.latLngBounds(pts).pad(0.4), {maxZoom:19});
+  history.replaceState(null, '', '#' + found.join(','));
+}
+$('fFind').addEventListener('keydown', (e) => { if (e.key === 'Enter') findIds(e.target.value); });
+window.addEventListener('hashchange', () => { $('fFind').value = location.hash.slice(1); findIds($('fFind').value); });
+
+// 크게 확대하면(18 이상) 화면 안 후보마다 번호표를 붙입니다.
+let labelLayer = L.layerGroup().addTo(map);
+function drawLabels() {
+  labelLayer.clearLayers();
+  if (map.getZoom() < 18 || !layer) return;
+  const view = map.getBounds();
+  layer.eachLayer(l => {
+    const ll = l.getLatLng();
+    if (view.contains(ll)) L.tooltip({permanent:true, direction:'right', offset:[6, 0], className:'idlabel', interactive:false})
+      .setLatLng(ll).setContent(l.feature.properties.id.slice(1)).addTo(labelLayer);
+  });
+}
+map.on('zoomend moveend', drawLabels);
 
 function photoDetails(report) {
   if (!report) return '';
@@ -344,7 +385,8 @@ function show(f) {
     <button class="back" id="bBack">← 개요로</button>
     <h2>${esc(displayName(f))} ${poiName(f) ? `<small class="muted">${esc(p.id)}</small>` : ''} <span class="pill ${PILL[V(p)]}">${esc(V(p))}</span>${V(p) !== baseV(p) ? ` <span class="muted">(전체 규칙 적용 시 ${esc(baseV(p))})</span>` : ''} ${p.score !== null ? `점수 ${esc(p.score)}` : ''}</h2>
     <div class="muted">${esc(p.name || '(이름 없음)')} · ${esc(ROAD[p.road_type] || p.road_type)}${p.oneway ? ' · 일방통행' : ''} · ${lat.toFixed(5)}, ${lon.toFixed(5)} · 바라보는 방향 ${esc(p.heading)}°</div>
-    <div class="links"><a href="${kakao}" target="_blank" rel="noopener">카카오 로드뷰 열기</a>${google ? `<a href="${google}" target="_blank" rel="noopener">구글 스트리트뷰 열기</a>` : ''}</div>
+    <div class="muted">위경도 <b id="bLatLon">${lat.toFixed(7)}, ${lon.toFixed(7)}</b> <button id="bCopy" title="위경도와 카카오맵 링크를 복사">복사</button></div>
+    <div class="links"><a href="https://map.kakao.com/link/map/${encodeURIComponent(p.id)},${lat},${lon}" target="_blank" rel="noopener">카카오맵 열기</a><a href="${kakao}" target="_blank" rel="noopener">카카오 로드뷰 열기</a>${google ? `<a href="${google}" target="_blank" rel="noopener">구글 스트리트뷰 열기</a>` : ''}</div>
     <div class="muted">${p.image_id ? '구글 사진 있음 (사진 ID로 열림)' : '연결된 구글 사진 없음. 카카오 로드뷰로 확인'} · ${p.vision ? '사진 판독 결과 입력됨' : '사진 판독 결과 미입력'}</div>
     ${poiDetails(f)}
     ${photoDetails(p.vision)}
@@ -414,6 +456,10 @@ function show(f) {
     saveReviews(); state();
   };
   state();
+  $('bCopy').onclick = () => {
+    const text = `${p.id}\t${lat.toFixed(7)}, ${lon.toFixed(7)}\thttps://map.kakao.com/link/map/${p.id},${lat},${lon}\t${kakao}`;
+    (navigator.clipboard ? navigator.clipboard.writeText(text) : Promise.reject()).then(() => { $('bCopy').textContent = '복사됨'; }, () => { prompt('복사하세요', text); });
+  };
   $('bOk').onclick = () => save('승인'); $('bNo').onclick = () => save('반려');
   $('bClr').onclick = () => { $('note').value = ''; save(null); };
   $('note').oninput = () => save(undefined);
@@ -432,6 +478,7 @@ $('btnHtml').onclick = async () => {
   const a = document.createElement('a'); a.href = URL.createObjectURL(await res.blob()); a.download = 'pudo_result.html'; a.click();
 };
 draw();
+if (location.hash.length > 1) { $('fFind').value = decodeURIComponent(location.hash.slice(1)); findIds($('fFind').value); }
 connectServer();
 </script>
 </body>
