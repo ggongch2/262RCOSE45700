@@ -5,7 +5,9 @@
   - 차도 면이 없는 좁은 길(1:1000은 중심선만 그림)은 적힌 도로폭의 절반을 차도 끝으로 본다.
   - 교차로 안처럼 차도 끝을 찾지 못하면 후보를 만들지 않는다.
   - 차도 가운데 섬(중앙 버스승강장처럼 보도로 그려졌지만 사방이 차도인 면)은 차도 끝으로 보지 않고 건너간다.
-  - 도로 유형(road_type)·일방 진행 방향·osm_way는 같은 방향으로 가장 가까운 OSM 길에서 가져온다 (화면 필터용, 없으면 생략).
+  - 도로 유형(road_type)은 1:1000 도로명 끝 글자(대로·로·길)로 정한다 (도로명주소법 시행령 제6조).
+  - OSM은 일방통행 진행 방향에만 쓴다. 1:1000에는 일방통행 여부만 있고 진행 방향이 없음
+    (선을 그린 방향은 진행 방향과 맞는 곳·반대인 곳이 섞여 있음). osm_way = 방향을 가져온 OSM 길.
 
 입력: data/map1000/ (+ 있으면 data/osm_roads_gangnam.json)
 출력: data/candidates_v1.geojson  (id, heading, side, road_type, oneway, lanes, road_width_m, curb_offset_m, position_source, centerline, ...)
@@ -35,6 +37,18 @@ OSM_MATCH_M = 20             # 이 거리 안, 방향 차이 30° 이하의 OSM 
 DIRECTION_LOOK_M = 2         # 도로선 위 한 점의 진행 방향을 잴 때 앞뒤로 보는 거리
 RAY_END_TOLERANCE_M = 0.5    # 차도 끝이 가로선 끝(MAP1000_CURB_RAY_M)에서 이 거리 안이면 끝까지 차도 = 교차로·광장 안
 BEYOND_ROAD_M = 3            # 잰 차도 끝이 도로폭(보도 포함)/2 + 이 값보다 멀면 옆 도로 면까지 간 것으로 보고 도로폭/2를 씀
+
+
+def road_class(name):
+    """도로명 끝 글자로 도로 등급: 대로(폭 40m 이상·8차로 이상) / 로(12~40m·2~8차로) / 길(그 외).
+    도로명주소법 시행령 제6조의 도로 구분. 이름이 없으면 '이름 없음'."""
+    name = (name or "").strip()
+    if not name:
+        return "이름 없음"
+    for suffix in ("대로", "로", "길"):
+        if name.endswith(suffix):
+            return suffix
+    return "기타"
 
 
 def _bearing(a, b):
@@ -129,10 +143,10 @@ def _from_map1000(folder, osm_path):
                 if math.hypot(hx, hy) > RADIUS:
                     continue
                 per_direction = None if total is None else (total if oneway else total // 2)
-                road_type = tags.get("highway") or ("residential" if name else "service")
+                road_type = road_class(name)
                 feats.append({"type": "Feature", "geometry": {"type": "Point", "coordinates": list(inv(hx, hy))},
                     "properties": {"id": f"P{k:04d}", "heading": round(heading), "side": side, "road_type": road_type,
-                                   "name": name or tags.get("name", ""), "osm_way": way["id"] if way else None, "oneway": oneway,
+                                   "name": name or "", "osm_way": way["id"] if way else None, "oneway": oneway,
                                    "lanes": per_direction, "lanes_source": "map1000", "road_width_m": road_width,
                                    "road_width_source": "1:1000 도로폭 (보도 포함)", "curb_offset_m": round(off, 1),
                                    "position_source": basis, "centerline": list(inv(center.x, center.y))}})

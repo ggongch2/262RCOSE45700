@@ -13,7 +13,7 @@ import heapq
 import re
 from collections import defaultdict
 
-from shapely.geometry import LineString, Point
+from shapely.geometry import Point
 from shapely.ops import substring, unary_union
 from shapely.strtree import STRtree
 
@@ -60,23 +60,56 @@ def zone_evidence(signs, marks, facilities):
     return seeds, boundaries
 
 
-def build_child_zone(road_elements, seeds, boundaries, *, reach=ZONE_REACH_M, facility_reach=FACILITY_REACH_M, snap=SNAP_M,
+def map1000_edges(lines, snap):
+    """1:1000 도로중심선 [(선, 차로수, 일방, 도로명, 도로폭)] → 도로 그래프 간선 [(선, 시작 노드, 끝 노드, 도로 이름)].
+
+    1:1000 선에는 서로 이어졌다는 정보(공유 노드)가 없어 위치로 잇습니다.
+      - 선 끝점끼리 snap 안에 모이면 같은 노드.
+      - 선 끝점이 다른 선 중간에 snap 안으로 닿으면(T자) 그 선을 그 자리에서 나눠 같은 노드로 잇습니다.
+      - 끝점 없이 중간끼리 교차하는 선(입체 교차 등)은 잇지 않습니다.
+    이름 없는 선은 선마다 다른 이름을 붙여, 같은 이름 도로를 따라 퍼질 때 서로 섞이지 않게 합니다.
+    """
+    items = [(line, name or f"선{index}") for index, (line, _, _, name, _) in enumerate(lines) if line.length > 0]
+    clusters, grid = [], defaultdict(list)   # 노드 좌표, 격자 칸 → 노드 번호
+
+    def node_at(point):
+        cx, cy = int(point.x // snap), int(point.y // snap)
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for number in grid[(cx + dx, cy + dy)]:
+                    if clusters[number].distance(point) <= snap:
+                        return number
+        clusters.append(point)
+        grid[(cx, cy)].append(len(clusters) - 1)
+        return len(clusters) - 1
+
+    ends = [(node_at(Point(line.coords[0])), node_at(Point(line.coords[-1]))) for line, _ in items]
+    tree = STRtree([line for line, _ in items])
+    cuts = defaultdict(list)   # 선 번호 → [(위치, 노드)]
+    for number, point in enumerate(clusters):
+        for index in tree.query(point.buffer(snap)):
+            line = items[index][0]
+            offset = line.project(point)
+            if snap < offset < line.length - snap and line.distance(point) <= snap:
+                cuts[index].append((offset, number))
+    edges = []
+    for index, (line, name) in enumerate(items):
+        stops = [(0.0, ends[index][0])] + sorted(cuts[index]) + [(line.length, ends[index][1])]
+        for (start, a), (end, b) in zip(stops, stops[1:]):
+            if end - start > 0:
+                edges.append((substring(line, start, end), a, b, name))
+    return edges
+
+
+def build_child_zone(edges, seeds, boundaries, *, reach=ZONE_REACH_M, facility_reach=FACILITY_REACH_M, snap=SNAP_M,
                      facility_snap=FACILITY_SNAP_M):
     """씨앗에서 도로를 따라 퍼진 구간(선)을 돌려줍니다. 씨앗이 없으면 None.
 
+    edges = 도로 그래프 간선 [(선, 시작 노드, 끝 노드, 도로 이름)] (map1000_edges로 만든 1:1000 도로중심선).
     표지·노면표시는 도로마다 설치되므로 같은 이름의 도로를 따라서만 퍼집니다. 근거 하나는 앞뒤 50m를,
     같은 도로의 두 근거가 reach 안에 있으면 그 사이 전체를 덮습니다.
     지정 시설 씨앗만 facility_snap 안의 가장 가까운 도로에 붙어, 주변 도로 어느 방향으로든 facility_reach까지 퍼집니다.
     """
-    edges = []   # (선, 시작 노드, 끝 노드, 도로 이름)
-    for way in road_elements:
-        if way.get("type") != "way":
-            continue
-        name = way.get("tags", {}).get("name") or f"way{way['id']}"
-        points = [to_meters(p["lon"], p["lat"]) for p in way["geometry"]]
-        for (a, b), pa, pb in zip(zip(way["nodes"], way["nodes"][1:]), points, points[1:]):
-            if pa != pb:
-                edges.append((LineString([pa, pb]), a, b, name))
     if not edges or not seeds:
         return None
     tree = STRtree([edge[0] for edge in edges])

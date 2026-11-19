@@ -40,8 +40,13 @@ class Map1000CandidateTests(unittest.TestCase):
             x, y = to_meters(*f["geometry"]["coordinates"])
             self.assertFalse(abs(x) < 4 and abs(y) < 7, (x, y))              # 두 차도가 겹치는 교차로 안에는 없음
 
-    def test_without_osm_road_type_comes_from_name(self):
-        self.assertTrue(all(p["road_type"] == "residential" and p["osm_way"] is None for p in self.props))
+    def test_road_type_comes_from_the_1000_road_name(self):
+        self.assertTrue(all(p["osm_way"] is None for p in self.props))
+        self.assertEqual({p["road_type"] for p in self.props if p["name"] == "가로로"}, {"로"})
+
+    def test_road_class_by_name_suffix(self):
+        self.assertEqual([candidates.road_class(n) for n in ("강남대로", "테헤란로", "강남대로94길", "", None)],
+                         ["대로", "로", "길", "이름 없음", "이름 없음"])
 
 
 class Map1000IslandTests(unittest.TestCase):

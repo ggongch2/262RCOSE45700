@@ -16,7 +16,7 @@ from shapely.geometry import shape
 
 from .config import CONTINUATION_TURN_DEG, require_files
 from .geo import to_meters
-from .zones import build_child_zone, zone_evidence
+from .zones import build_child_zone, map1000_edges, zone_evidence
 
 
 @dataclass
@@ -583,7 +583,9 @@ def load_map_data(data_dir, sv_dir):
     except FileNotFoundError:
         surface, links = [], []
 
-    roads = read_json(data_dir / "osm_roads_gangnam.json")["elements"]
+    # 1:1000 수치지형도: 교차로 면과 어린이보호구역 구간(도로중심선 그래프)에 씁니다.
+    map1000 = _map1000(data_dir / MAP1000_DIR)
+    road_edges = map1000_edges(map1000.lines, JUNCTION_SNAP_M) if map1000 is not None else []
     facilities, designated = _protection_facilities(data_dir, layers)
     child_zone, child_zone_facility, evidence = None, None, []
     signs_path, marks_path = data_dir / "tgis" / "A064_P_signs.geojson", data_dir / "tgis" / "A054_P_text_marks.geojson"
@@ -592,13 +594,12 @@ def load_map_data(data_dir, sv_dir):
         # 지정 범위를 몰라, 시설 주변 도로는 따로 만들어 '확인 필요'로만 씁니다 (간선도로로 번지는 과대 추정 방지).
         # 지정 목록이 없을 때의 스냅샷 학교 좌표(블록 중심, 지정 여부 모름)는 쓰지 않습니다.
         evidence, boundaries = zone_evidence(read_json(signs_path)["features"], read_json(marks_path)["features"], [])
-        child_zone = build_child_zone(roads, evidence, boundaries)
+        child_zone = build_child_zone(road_edges, evidence, boundaries)
         if designated:
             facility_seeds, _ = zone_evidence([], [], facilities)
-            child_zone_facility = build_child_zone(roads, facility_seeds, boundaries)
+            child_zone_facility = build_child_zone(road_edges, facility_seeds, boundaries)
             evidence = evidence + facility_seeds
     # 교차로 면: 1:1000 도로선·차도 폭 + 표준노드 교차로 점. 1:1000이 없으면 교차로 면 없음(H1 자료 없음 → 확인 필요)
-    map1000 = _map1000(data_dir / MAP1000_DIR)
     intersection_area, junctions = (_intersection_area_map1000(map1000, _moct_junctions(data_dir / MOCT_NODE_FILE))
                                     if map1000 is not None else (None, []))
     return MapData(
