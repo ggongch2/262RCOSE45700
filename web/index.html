@@ -245,7 +245,7 @@ function draw() {
     + (off.size ? ` <span class="pill new">해제로 가능 +${freed}</span>` : '');
   overview(fs);
   if (selected) { if (selectedRing) selectedRing.bringToFront(); }
-  if (typeof drawLabels === 'function') drawLabels();
+  if (typeof drawLabels === 'function') { clearTimeout(labelTimer); labelTimer = setTimeout(drawLabels, 150); }
 }
 
 function bars(counts, total, cls) {
@@ -313,19 +313,20 @@ function findIds(text) {
 $('fFind').addEventListener('keydown', (e) => { if (e.key === 'Enter') findIds(e.target.value); });
 window.addEventListener('hashchange', () => { $('fFind').value = location.hash.slice(1); findIds($('fFind').value); });
 
-// 크게 확대하면(18 이상) 화면 안 후보마다 번호표를 붙입니다.
-let labelLayer = L.layerGroup().addTo(map);
+// 크게 확대하면(LABEL_ZOOM 이상) 화면 안 후보마다 번호표를 붙입니다.
+// 번호표는 HTML 요소라 많으면 지도가 느려지므로: 이동·확대가 끝났을 때 한 번만 그리고, 확대 중에는 지우고, 최대 LABEL_MAX개.
+const LABEL_ZOOM = 19, LABEL_MAX = 150;
+let labelLayer = L.layerGroup().addTo(map), labelTimer = null;
 function drawLabels() {
   labelLayer.clearLayers();
-  if (map.getZoom() < 18 || !layer) return;
-  const view = map.getBounds();
-  layer.eachLayer(l => {
-    const ll = l.getLatLng();
-    if (view.contains(ll)) L.tooltip({permanent:true, direction:'right', offset:[6, 0], className:'idlabel', interactive:false})
-      .setLatLng(ll).setContent(l.feature.properties.id.slice(1)).addTo(labelLayer);
-  });
+  if (map.getZoom() < LABEL_ZOOM || !layer) return;
+  const view = map.getBounds(), inView = [];
+  layer.eachLayer(l => { if (inView.length < LABEL_MAX && view.contains(l.getLatLng())) inView.push(l); });
+  inView.forEach(l => L.tooltip({permanent:true, direction:'right', offset:[6, 0], className:'idlabel', interactive:false})
+    .setLatLng(l.getLatLng()).setContent(l.feature.properties.id.slice(1)).addTo(labelLayer));
 }
-map.on('zoomend moveend', drawLabels);
+map.on('zoomstart movestart', () => { clearTimeout(labelTimer); labelLayer.clearLayers(); });
+map.on('moveend', () => { clearTimeout(labelTimer); labelTimer = setTimeout(drawLabels, 150); });
 
 function photoDetails(report) {
   if (!report) return '';
