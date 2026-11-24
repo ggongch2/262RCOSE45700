@@ -156,6 +156,7 @@ addOverlay('횡단보도', '#4dabf7', overlay('crosswalk', {color:'#1c7ed6', fil
 addOverlay('버스정류장', '#9775fa', overlay('bus', {color:'#6741d9', fillColor:'#9775fa', fillOpacity:1, weight:1, radius:4}), false);
 addOverlay('소화전', '#ff6b6b', overlay('hydrant', {color:'#c92a2a', fillColor:'#ff6b6b', fillOpacity:1, weight:1, radius:3}), false);
 addOverlay('택시승차대', '#fcc419', overlay('taxi_stand', {color:'#e67700', fillColor:'#fcc419', fillOpacity:1, weight:1, radius:5, interactive:true}), true);
+addOverlay('카카오 가능 지점 (로드뷰 검증)', '#1c3fd8', overlay('kakao_ok', {color:'#0026b3', fillColor:'#1c3fd8', fillOpacity:.5, weight:5, opacity:.6, radius:8, interactive:true}), true);
 L.control.layers({'브이월드 지도': vworld, '브이월드 위성': vworldSat, 'OSM (서버로 열 때만)': osm}, overlays, {collapsed:false, position:'topright'}).addTo(map);
 
 // 규칙 목록은 처음 불러온 판정(기본 조건)에 나온 규칙 코드로 한 번만 만듭니다.
