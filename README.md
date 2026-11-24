@@ -24,6 +24,7 @@ git pull
 | 서울시 버스정류소 위치정보 | `data/seoul_bus_stops.geojson` | H3 거리 판정과 정류장 이름 추천에 같은 목록 사용 |
 | 도로명주소 전자지도 (강남구·서초구, EPSG:5179) | `data/raw/juso/` 아래에 지역별 압축 해제 | `TL_SPBD_ENTRC` 출입구, `TL_SPBD_BULD` 건물명·번호·외곽, `TL_SPRD_MANAGE` 도로명. SHP와 DBF 파일을 원래 폴더 구조대로 유지 |
 | 소상공인시장진흥공단 서울 상가정보 | `data/raw/sbiz/소상공인시장진흥공단_상가(상권)정보_서울_*.csv` | 같은 도로 쪽 25m 이내 상가 이름 추천 (선택) |
+| 카카오 가능 지점 (로드뷰 검증) | `data/kakao_ok_points.geojson` | 화면의 "카카오 가능 지점" 레이어로 겹쳐 보기만 함. 판정에는 안 씀 (선택). 고치면 서버만 다시 켜면 됨 |
 | OSM 지하철 출구 | `data/osm_poi_gangnam.json` | 지하철 출구 위치·번호 추천 (선택). 없으면 `python -m pudo download --poi-only`로 수집 |
 
 새 데이터를 넣었으면 4단계부터 실행합니다. 자료별 출처와 세부 조건은 [데이터 출처](docs/data-sources.md)를 참고하세요.

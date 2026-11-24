@@ -25,6 +25,7 @@ SCHEMA_VERSION = "pudo-measure.v5"
 PREPARED_DIR = "prepared"
 MEASUREMENT_FILE = "measurements.json"
 LAYER_FILE = "layers.json"
+REFERENCE_LAYERS = {"kakao_ok": "kakao_ok_points.geojson"}   # 화면 레이어 이름 → data/ 안 파일
 HD_COVER_M = 15                       # 후보에서 이 거리 안에 정밀도로지도 차로링크가 있으면 그 도로를 덮는 것으로 봄
 NO_STOP = ("010", "014", "015", "005", "017")   # T-GIS 규제차선 코드: 주정차금지
 NO_PARK = ("009",)                              # T-GIS 규제차선 코드: 주차금지 (정차 가능)
@@ -364,7 +365,13 @@ def load_prepared(data_dir, sv_dir, *, refresh=False):
         print("측정 코드가 바뀌어 측정값을 다시 준비합니다…", flush=True)
         prepare(data_dir, sv_dir)
         payload = json.loads(measurement_path.read_text(encoding="utf-8"))
-    return payload["candidates"], json.loads(layer_path.read_text(encoding="utf-8"))
+    layers = json.loads(layer_path.read_text(encoding="utf-8"))
+    # 판정에는 안 쓰고 화면에 겹쳐 보기만 하는 참고 자료 (있을 때만). 측정값을 다시 만들지 않으므로 고치면 서버만 다시 켜면 됩니다.
+    for name, filename in REFERENCE_LAYERS.items():
+        path = Path(data_dir) / filename
+        if path.is_file():
+            layers[name] = json.loads(path.read_text(encoding="utf-8"))
+    return payload["candidates"], layers
 
 
 def summarize(measurements):
