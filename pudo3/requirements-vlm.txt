@@ -1,0 +1,20 @@
+# pudo3 Qwen3.5 4bit 실행 의존성 (pudo2 가상환경과 분리해서 설치하세요: transformers 5가 필요)
+# 설치: python -m pip install -r pudo3/requirements-vlm.txt
+# 모델 파일은 직접 다운로드합니다. 코드는 local_files_only=True로만 읽습니다.
+#
+# GIS·서버 (pudo2와 동일)
+shapely>=2.0,<3
+numpy>=1.24
+python-dotenv>=1.0,<2
+pyshp>=2.3,<4
+pyproj>=3.6,<4
+# 로드뷰 캡처
+playwright>=1.40       # 설치 후: python -m playwright install chromium
+# Qwen3.5 (Tesla T4: 4bit NF4 + FP16 계산 + SDPA)
+torch>=2.4             # CUDA 빌드 (먼저 따로 설치)
+torchvision>=0.19
+transformers>=5        # Qwen3.5 지원 버전
+accelerate>=1.0        # device_map={"": 0}
+bitsandbytes>=0.45     # 4bit 양자화
+safetensors>=0.4
+pillow>=10

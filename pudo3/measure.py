@@ -1,0 +1,388 @@
+"""준비 단계: 후보마다 지도에서 사실(측정)과 추정값을 구합니다. 판정은 하지 않습니다.
+
+원칙
+  - 기준값(TH)을 쓰지 않습니다. 기준값이 바뀌어도 측정값은 그대로입니다.
+  - 데이터에 없으면 None(모름)으로 둡니다. 가정으로 채우지 않습니다.
+  - 계산에 꼭 필요한 추정(후보 위치, 교차로 면, 보호구역 구간)은 추정이라는 것과 근거를 남깁니다.
+
+pudo3 결과는 pudo3/runtime/prepared/measurements.json (`python -m pudo3 prepare`)이며 판정(rules.py)의 유일한 입력입니다.
+입력 data/는 읽기 전용이며 여기에 아무것도 쓰지 않습니다.
+거리 단위는 m입니다.
+"""
+
+import argparse
+import hashlib
+import json
+import math
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+
+from .config import DATA_DIR, RUNTIME_DIR, SV_DIR
+from .geo import distance_to_area, distance_to_lines, distance_to_points, distance_to_segment, distance_to_segments, to_meters
+
+SCHEMA_VERSION = "pudo-measure.v5"
+PREPARED_DIR = "prepared"
+MEASUREMENT_FILE = "measurements.json"
+LAYER_FILE = "layers.json"
+HD_COVER_M = 15                       # 후보에서 이 거리 안에 정밀도로지도 차로링크가 있으면 그 도로를 덮는 것으로 봄
+NO_STOP = ("010", "014", "015", "005", "017")   # T-GIS 규제차선 코드: 주정차금지
+NO_PARK = ("009",)                              # T-GIS 규제차선 코드: 주차금지 (정차 가능)
+LANE_SOURCE = {"map1000": "1:1000 수치지형도"}
+# 측정값을 만드는 코드. 이 파일들이 바뀌면 저장된 측정값을 다시 만듭니다 (판정 코드 rules.py는 제외).
+PREPARE_MODULES = ("candidates.py", "config.py", "datasets.py", "export.py", "geo.py", "measure.py", "zones.py")
+TAXI_SEARCH_M = 60                    # 이 직선거리 안의 택시승차대만 봄 (같은 도로 앞뒤)
+TAXI_SIDEWALK_M = 15                  # 승차대 좌표가 차도 끝에서 바깥(보도·건물 쪽)으로 이만큼까지는 같은 도로로 봄
+
+
+def _round(value):
+    """측정값은 정밀도를 줄이지 않고 저장합니다 (반올림하면 기준값 경계에서 판정이 바뀝니다)."""
+    return None if value is None else float(value)
+
+
+MAP1000_LINE_M = 12                   # 후보 중심선 점에서 이 거리 안의 1:1000 도로중심선만 같은 도로로 봄
+MAP1000_ANGLE_DEG = 30                # 도로 방향 차이가 이보다 크면 교차 도로로 보고 제외
+MAP1000_RAY_M = 40                    # 차도 끝을 찾을 때 중심선 점에서 양쪽으로 뻗는 길이. 끝까지 차도면 교차로 안이라 모름
+MAP1000_SIDEWALK_M = 3                # 차도 끝 바깥 이 거리 안에 보도 면이 있으면 보도 있음
+DIRECTION_LOOK_M = 2                  # 도로선 위 한 점의 진행 방향을 잴 때 앞뒤로 보는 거리
+ON_CARRIAGEWAY_M = 1.5                # 중심선 점에서 이 거리 안에 걸친 차도 조각을 '이 도로의 차도'로 봄
+RAY_END_TOLERANCE_M = 0.5             # 가로선 끝까지 차도면(길이가 2 x MAP1000_RAY_M - 이 값 이상) 교차로 안으로 봄
+
+
+def _map1000(pr, data):
+    """1:1000 수치지형도: 같은 도로의 차로수(양방향 합)·일방통행, 차도 폭(도로폭 - 양쪽 보도 폭), 차도 끝 바깥 보도.
+
+    None = 자료 없음. 값마다 None = 그 항목을 잴 수 없음(같은 방향 중심선 없음, 교차로 안 등).
+    """
+    source = data.map1000
+    if source is None or not pr.get("centerline"):
+        return None
+    from shapely.geometry import LineString, Point
+    center = Point(to_meters(*pr["centerline"]))
+    heading = math.radians(pr["heading"])                 # 중심선에서 차도 끝 쪽
+    dx, dy = math.sin(heading), math.cos(heading)
+    road_dir = (pr["heading"] + 90) % 180
+
+    def direction(line):
+        at = line.project(center)
+        a, b = line.interpolate(max(0.0, at - DIRECTION_LOOK_M)), line.interpolate(min(line.length, at + DIRECTION_LOOK_M))
+        return math.degrees(math.atan2(b.x - a.x, b.y - a.y)) % 180
+
+    match = None
+    for index in source.line_tree.query(center.buffer(MAP1000_LINE_M)):
+        line, total, oneway, name, road_width = source.lines[index]
+        distance = line.distance(center)
+        diff = abs(direction(line) - road_dir)
+        if distance <= MAP1000_LINE_M and min(diff, 180 - diff) <= MAP1000_ANGLE_DEG and (match is None or distance < match[0]):
+            match = (distance, total, oneway, name, road_width)
+
+    ray = LineString([(center.x - dx * MAP1000_RAY_M, center.y - dy * MAP1000_RAY_M),
+                      (center.x + dx * MAP1000_RAY_M, center.y + dy * MAP1000_RAY_M)])
+    cut = ray.intersection(source.carriageway)
+    pieces = [piece for piece in getattr(cut, "geoms", [cut]) if piece.geom_type == "LineString" and piece.distance(center) < ON_CARRIAGEWAY_M]
+    curb = None
+    if pieces and pieces[0].length < 2 * MAP1000_RAY_M - RAY_END_TOLERANCE_M:
+        curb = max((x - center.x) * dx + (y - center.y) * dy for x, y in pieces[0].coords)
+
+    sidewalk = sidewalk_width = None
+    if curb is not None:
+        probe = LineString([(center.x + dx * curb, center.y + dy * curb),
+                            (center.x + dx * (curb + MAP1000_SIDEWALK_M), center.y + dy * (curb + MAP1000_SIDEWALK_M))])
+        widths = [source.sidewalks[i][1] for i in source.sidewalk_tree.query(probe) if source.sidewalks[i][0].intersects(probe)]
+        sidewalk = bool(widths)
+        sidewalk_width = max((w for w in widths if w), default=None)
+    # 차도 폭: 도로중심선 도로폭(보도 포함) - 양쪽 보도 폭
+    attr_width = source.carriageway_width(center, pr["heading"], match[4]) if match else None
+    return {"lanes_total": match[1] if match else None, "oneway": match[2] if match else None, "road_name": match[3] if match else None,
+            "road_width": _round(match[4]) if match else None,
+            "carriageway_width": _round(attr_width),
+            "curb_offset": _round(curb), "sidewalk": sidewalk, "sidewalk_width": _round(sidewalk_width)}
+
+
+def _safety_zone(p, data, hd_covered):
+    """안전지대까지 거리: 정밀도로지도 노면선 531(덮는 곳만)과 1:1000 안전지대 면(교통섬·도색) 중 가까운 것.
+
+    covered = 둘 중 하나라도 그 지점을 덮음. distance None = 덮는데 안전지대 없음.
+    """
+    found = []
+    if data.hd_safe and hd_covered:
+        d = distance_to_segments(p, data.hd_safe)
+        if d is not None:
+            found.append((d, "정밀도로지도"))
+    map1000 = data.map1000
+    if map1000 is not None and map1000.safety:
+        from shapely.geometry import Point
+        point = Point(p)
+        found.append((min(area.distance(point) for area, _ in map1000.safety), "1:1000"))
+    covered = bool(data.hd_safe and hd_covered) or map1000 is not None
+    distance, source = min(found, default=(None, None))
+    return {"covered": covered, "distance": _round(distance), "source": source}
+
+
+def _police_zone(p, data):
+    """경찰청 지정 경계까지의 거리(면 안이면 0)와 가장 가까운 구역의 시설 이름. 자료가 없으면 None."""
+    if data.police_zones is None:
+        return None
+    from shapely.geometry import Point
+    point = Point(p)
+    distance, label = min(((area.distance(point), name) for area, name in data.police_zones), default=(None, None))
+    return {"distance": _round(distance), "label": label}
+
+
+def _child_zone(pr, p, data):
+    """어린이보호구역 측정. 경찰청 지정 경계(있으면)와 T-GIS 추정 구간(대조용)을 함께 남깁니다."""
+    zone = _child_zone_estimate(pr, p, data)
+    zone["police"] = _police_zone(p, data)
+    return zone
+
+
+def _child_zone_estimate(pr, p, data):
+    """T-GIS 구간이 있으면 구간 안/지정 시설 주변/밖, 없으면 대상시설까지 거리."""
+    if data.child_zone is not None or data.child_zone_facility is not None:
+        road = to_meters(*pr["centerline"]) if pr.get("centerline") else p
+
+        def nearest(facility):
+            found = [(math.hypot(p[0] - x, p[1] - y), label) for (x, y), label in data.child_zone_evidence
+                     if label.startswith("지정 시설") == facility]
+            return min(found, default=(None, None))
+
+        if data.child_zone is not None and distance_to_area(road, data.child_zone) <= 1.0:
+            near = nearest(False)
+            label = f"근거 {near[1]} {near[0]:.0f}m" if near[0] is not None else "근거 없음"
+            return {"mode": "tgis", "state": "in", "label": label}
+        if data.child_zone_facility is not None and distance_to_area(road, data.child_zone_facility) <= 1.0:
+            near = nearest(True)
+            label = f"{near[1]} {near[0]:.0f}m" if near[0] is not None else "지정 시설"
+            return {"mode": "tgis", "state": "near", "label": label}
+        return {"mode": "tgis", "state": "out", "label": None}
+    nearest_school = min(((math.hypot(p[0] - s[0], p[1] - s[1]), name) for s, name in data.schools), default=(None, None))
+    distance, name = nearest_school
+    return {"mode": "radius", "distance": _round(distance), "label": f"{name} {distance:.0f}m" if distance is not None else None}
+
+
+def _no_stop_2023(p, data):
+    """후보에서 가장 가까운 2021 주정차금지 선이 2023 목록에도 있는지. 2023 목록이 없거나 2021 선이 없으면 None."""
+    if data.lines_2023 is None:
+        return None
+    nearest = min(((distance_to_segment(p, segment), code, index) for code in NO_STOP
+                   for index, segment in enumerate(data.lines.get(code, ()))), default=None)
+    if nearest is None:
+        return None
+    _, code, index = nearest
+    flags = data.lines_2023.get(code, [])
+    return bool(flags[index]) if index < len(flags) else False
+
+
+def _taxi_stand(pr, p, data):
+    """같은 도로·같은 쪽에 있는 가장 가까운 택시승차대까지 도로를 따라 잰 거리.
+
+    승차대 목록은 시설물 점 하나만 있고 정차 구간(시작·끝)은 없습니다. 길 건너편 승차대를 빼려고
+    도로 중심선 기준으로 후보와 같은 쪽(차도 끝 쪽)에 있는 승차대만 보고, 진행 방향 성분만 거리로 씁니다.
+    승차대 좌표가 차도 안에 찍힌 경우가 있어 중심선과 차도 끝 사이도 같은 쪽으로 봅니다.
+    일방통행 차도(중앙분리대로 나뉜 대로의 한쪽 포함)는 차도 끝이 오른쪽 하나뿐이라 차도 안 전체를 같은 쪽으로 봅니다.
+    """
+    if data.taxi_stands is None:
+        return None
+    heading = math.radians(pr.get("heading", 0))          # 중심선 → 차도 끝 방향
+    nx, ny = math.sin(heading), math.cos(heading)
+    tx, ty = -ny, nx                                       # 진행 방향
+    offset = pr.get("curb_offset_m") or 0
+    oneway = str(pr.get("oneway", "no")).lower() in ("yes", "true", "1", "-1")
+    center = to_meters(*pr["centerline"]) if pr.get("centerline") else (p[0] - nx * offset, p[1] - ny * offset)
+    best = (None, None)
+    for (x, y), label in data.taxi_stands:
+        if math.hypot(x - p[0], y - p[1]) > TAXI_SEARCH_M:
+            continue
+        across = (x - center[0]) * nx + (y - center[1]) * ny
+        lowest = -offset if oneway else 0
+        if not lowest < across <= offset + TAXI_SIDEWALK_M:
+            continue
+        along = abs((x - p[0]) * tx + (y - p[1]) * ty)
+        if best[0] is None or along < best[0]:
+            best = (along, label)
+    return {"distance": _round(best[0]), "label": best[1], "estimated": True}
+
+
+def _planned_road(pr, p, data):
+    """후보 도로가 속한 도시계획시설 도로 {grade, min_width}. 없으면 None.
+
+    교차로에서는 가로지르는 도로의 면에 걸리기 쉬워, 도로 중심점과 진행 방향 앞뒤 10m가
+    모두 같은 면 안에 있을 때만 그 도로의 등급으로 봅니다.
+    """
+    if not data.planned_roads:
+        return None
+    from shapely.geometry import Point
+    center = to_meters(*pr["centerline"]) if pr.get("centerline") else p
+    along = math.radians((pr.get("heading", 0) - 90) % 360)   # heading은 진행 방향 우측(차도 끝 쪽)
+    dx, dy = math.sin(along) * 10, math.cos(along) * 10
+    probes = [Point(center), Point(center[0] + dx, center[1] + dy), Point(center[0] - dx, center[1] - dy)]
+    for area, grade, min_width in data.planned_roads:
+        if all(area.contains(probe) for probe in probes):
+            return {"grade": grade, "min_width": min_width}
+    return None
+
+
+def _position_basis(pr):
+    """후보 위치(차도 끝)를 정한 근거. candidates.py가 position_source에 남깁니다."""
+    return pr.get("position_source") or "근거 없음"
+
+
+def _image(pr, p, data):
+    """후보에 연결된 Google 사진. 다시 수집한 도로망은 후보 ID 순서가 바뀔 수 있어 좌표까지 확인합니다."""
+    image = data.images.get(pr["id"])
+    if not image:
+        return None
+    try:
+        query = to_meters(float(image["lon"]), float(image["lat"]))
+    except (KeyError, TypeError, ValueError):
+        return None
+    return {"pano_id": image["pano_id"]} if math.hypot(p[0] - query[0], p[1] - query[1]) <= 1 else None
+
+
+def measure(feature, data):
+    """후보 하나의 측정값."""
+    pr = feature["properties"]
+    p = to_meters(*feature["geometry"]["coordinates"])
+    d_intersection = distance_to_area(p, data.intersection_area)
+    hd_covered = (d := distance_to_segments(p, data.hd_link)) is not None and d <= HD_COVER_M
+    lanes_known = pr.get("lanes_source") in LANE_SOURCE
+    return {
+        "id": pr["id"], "coordinates": feature["geometry"]["coordinates"], "heading": pr["heading"],
+        "side": pr.get("side"), "centerline": pr.get("centerline"),
+        "road": {"name": pr.get("name", ""), "type": pr["road_type"], "osm_way": pr.get("osm_way"),
+                 "oneway": str(pr.get("oneway", "no")).lower() in ("yes", "true", "1", "-1")},
+        # 차도 끝 위치는 데이터에 없어 중심선에서 차도 반폭만큼 옮긴 추정 위치입니다.
+        "position": {"estimated": not str(pr.get("position_source", "")).startswith("1:1000 차도 끝"), "offset_m": pr.get("curb_offset_m"), "basis": _position_basis(pr)},
+        "lanes": {"value": pr["lanes"] if lanes_known else None, "source": LANE_SOURCE.get(pr.get("lanes_source"))},
+        "width": {"value": _round(pr.get("road_width_m")),
+                  "source": pr.get("road_width_source") if pr.get("road_width_m") is not None else None},
+        "planned_road": _planned_road(pr, p, data),
+        "sidewalk": {"value": None, "source": None},      # 확정값 없음. 사진 판독 결과가 들어오면 판정에서 반영 (지도 근거는 map1000.sidewalk)
+        # 1:1000 수치지형도. None = 자료 없음
+        "map1000": _map1000(pr, data),
+        "intersection": {"inside": None if d_intersection is None else d_intersection == 0,
+                         "distance": _round(d_intersection), "estimated": True},
+        "crosswalk": _round(distance_to_points(p, data.crosswalks)),
+        "bus_stop": _round(distance_to_points(p, data.buses)),
+        "hydrant": _round(distance_to_points(p, data.hydrants)),
+        "child_zone": _child_zone(pr, p, data),
+        "safety_zone": _safety_zone(p, data, hd_covered),
+        "reg_line": {
+            "tgis_no_stop": _round(distance_to_lines(p, data.lines, NO_STOP)),
+            "tgis_no_park": _round(distance_to_lines(p, data.lines, NO_PARK)),
+            "tgis_no_stop_2023": _no_stop_2023(p, data),   # 가장 가까운 2021 금지선이 2023 목록에도 있나 (None: 목록 없음)
+            "hd_covered": hd_covered,
+            "hd_no_stop": _round(distance_to_segments(p, data.hd_reg)) if hd_covered else None,
+            "hd_bus": _round(distance_to_segments(p, data.hd_bus)) if hd_covered else None,
+            "hd_no_park": _round(distance_to_segments(p, data.hd_park)) if hd_covered else None,
+        },
+        # 서울시 택시승차대 (시설물 점). None = 자료 없음, distance None = 같은 쪽 60m 안에 없음
+        "taxi_stand": _taxi_stand(pr, p, data),
+        "image": _image(pr, p, data),
+    }
+
+
+def measure_all(candidates, data):
+    return [measure(feature, data) for feature in candidates]
+
+
+def prepared_paths(runtime_dir=None):
+    folder = Path(runtime_dir or RUNTIME_DIR) / PREPARED_DIR
+    return folder / MEASUREMENT_FILE, folder / LAYER_FILE
+
+
+def _input_files(data_dir, sv_dir):
+    data_dir = Path(data_dir)
+    names = ["candidates_v1.geojson", "layers_gangnam.json", "osm_roads_gangnam.json", "child_protection_zones.json",
+             "child_protection_zones.csv", "vworld_upis_roads_gangnam.geojson", "hdmap/lt_l_a2link.geojson",
+             "hdmap/lt_l_b2surfacelinemark.geojson", "tgis/A064_P_signs.geojson", "tgis/A054_P_text_marks.geojson",
+             "taxi_stands.xlsx", "tgis/lane_facilities_2023.xlsx", "child_zones_police.json",
+             "vworld_moct_nodes_gangnam.geojson"]
+    files = [data_dir / name for name in names] + [Path(sv_dir) / "metadata.csv"]
+    # 압축을 풀면 shp는 원본 날짜(2025년)를 유지하므로 폴더 자체의 날짜도 봅니다.
+    files += [data_dir / "map1000", *sorted((data_dir / "map1000").glob("*/*.shp"))] if (data_dir / "map1000").is_dir() else []
+    return [path for path in files if path.exists()]
+
+
+def code_version():
+    """측정 코드 지문. 줄바꿈(CRLF/LF)을 맞춰서 Windows·Linux에서 같은 값이 나옵니다."""
+    digest = hashlib.sha256()
+    for name in PREPARE_MODULES:
+        digest.update(name.encode())
+        digest.update((Path(__file__).parent / name).read_bytes().replace(b"\r\n", b"\n"))
+    return digest.hexdigest()[:16]
+
+
+def is_stale(data_dir, sv_dir, runtime_dir=None):
+    """측정값 파일이 없거나 입력 데이터보다 오래되었는지."""
+    measurement_path, layer_path = prepared_paths(runtime_dir)
+    if not measurement_path.is_file() or not layer_path.is_file():
+        return True
+    built = min(measurement_path.stat().st_mtime, layer_path.stat().st_mtime)
+    return any(path.stat().st_mtime > built for path in _input_files(data_dir, sv_dir))
+
+
+def prepare(data_dir, sv_dir, runtime_dir=None):
+    """입력 데이터(읽기 전용) → 측정값과 지도 근거 레이어를 pudo3/runtime/prepared/에 저장합니다."""
+    from .candidates import generate
+    from .datasets import load_inputs
+    from .export import overlay_layers
+
+    measurement_path, layer_path = prepared_paths(runtime_dir)
+    candidates_path = None
+    if (Path(data_dir) / "map1000").is_dir():   # 후보 목록도 지금 코드로 다시 만듭니다 (runtime/에만 저장)
+        candidates_path = measurement_path.parent / "candidates_v1.geojson"
+        generate(data_dir, candidates_path)
+    candidates, data = load_inputs(data_dir, sv_dir, candidates_path)
+    measurements = measure_all(candidates, data)
+    measurement_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"schema_version": SCHEMA_VERSION, "code_version": code_version(), "generated_at": datetime.now(timezone.utc).isoformat(),
+               "count": len(measurements), "candidates": measurements}
+    for path, value in ((measurement_path, payload), (layer_path, overlay_layers(data))):
+        temp = path.with_suffix(path.suffix + ".tmp")
+        temp.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
+        os.replace(temp, path)
+    return measurements
+
+
+def load_prepared(data_dir, sv_dir, *, refresh=False, runtime_dir=None):
+    """(측정값 목록, 지도 근거 레이어). 없거나 입력보다 오래되면 pudo3/runtime/prepared/에 다시 준비합니다."""
+    measurement_path, layer_path = prepared_paths(runtime_dir)
+    if refresh or is_stale(data_dir, sv_dir, runtime_dir):
+        prepare(data_dir, sv_dir, runtime_dir)
+    payload = json.loads(measurement_path.read_text(encoding="utf-8"))
+    if payload.get("schema_version") != SCHEMA_VERSION or payload.get("code_version") != code_version():
+        print("측정 코드가 바뀌어 측정값을 다시 준비합니다…", flush=True)
+        prepare(data_dir, sv_dir, runtime_dir)
+        payload = json.loads(measurement_path.read_text(encoding="utf-8"))
+    return payload["candidates"], json.loads(layer_path.read_text(encoding="utf-8"))
+
+
+def summarize(measurements):
+    """측정값의 모름·추정 현황."""
+    total = len(measurements)
+    unknown = {
+        "차로 수 모름": sum(m["lanes"]["value"] is None for m in measurements),
+        "도로 폭 모름": sum(m["width"]["value"] is None for m in measurements),
+        "보도 모름": sum(m["sidewalk"]["value"] is None for m in measurements),
+        "도시계획 등급 없음": sum(m["planned_road"] is None for m in measurements),
+        "정밀도로지도 미커버": sum(not m["reg_line"]["hd_covered"] for m in measurements),
+        "택시승차대 자료 없음": sum(m["taxi_stand"] is None for m in measurements),
+    }
+    basis = {}
+    for m in measurements:
+        basis[m["position"]["basis"]] = basis.get(m["position"]["basis"], 0) + 1
+    print(f"후보 {total}개 측정")
+    print("  모름·없음:", ", ".join(f"{name} {count}" for name, count in unknown.items()))
+    print("  후보 위치(차도 끝) 추정 근거:", ", ".join(f"{name} {count}" for name, count in sorted(basis.items(), key=lambda x: -x[1])))
+
+
+def main(argv=None):
+    argparse.ArgumentParser(description="준비: 후보별 측정값 생성 (판정 없음)").parse_args(argv)
+    measurements = prepare(DATA_DIR, SV_DIR)
+    summarize(measurements)
+    print(f"저장: {prepared_paths()[0]}, {prepared_paths()[1]}")
+
+
+if __name__ == "__main__":
+    main()
